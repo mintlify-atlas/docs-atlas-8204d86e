@@ -1,0 +1,317 @@
+---
+title: Internal webhooks
+description: Internal endpoints called by the Cloudflare Worker to process R2 upload events and perform scheduled cleanup.
+---
+
+<Warning>
+  These endpoints are not intended to be called directly. They are invoked exclusively by the Cloudflare Worker — either in response to an R2 event notification (r2-webhook) or on a cron schedule (orphan-sweep). Calls without a valid `x-worker-secret` header are rejected with `401`.
+</Warning>
+
+All internal endpoints authenticate using a shared secret: the `x-worker-secret` request header must match the `WORKER_SECRET` environment variable. No cookie-based auth is used.
+
+---
+
+## POST /api/internal/r2-webhook
+
+Called by the Cloudflare Worker when R2 emits a `PutObject` event notification for a new upload. Finds the matching `File` record by `r2Key`, verifies the object exists in R2, and marks it `COMPLETED`.
+
+This endpoint is idempotent: if the file record is already `COMPLETED`, the call returns success without modifying any data.
+
+If no `File` record matches the `r2Key` (for example, a manually uploaded R2 object), the endpoint returns `200` with `skipped: true` to prevent the Worker from retrying indefinitely.
+
+**Authentication:** `x-worker-secret` header
+
+### Headers
+
+<ParamField header="x-worker-secret" type="string" required>
+  Must match the `WORKER_SECRET` environment variable exactly.
+</ParamField>
+
+### Body
+
+<ParamField body="r2Key" type="string" required>
+  The R2 object key of the file that was uploaded. This is used to look up the corresponding `File` database record.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="fileId" type="string">
+  The ID of the `File` record that was marked `COMPLETED`. Present on successful completion.
+</ResponseField>
+
+<ResponseField name="alreadyCompleted" type="boolean">
+  `true` if the file was already marked `COMPLETED` before this call (idempotent path).
+</ResponseField>
+
+<ResponseField name="skipped" type="boolean">
+  `true` if no `File` record was found for the given `r2Key`. The object is not managed by the platform.
+</ResponseField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://yourapp.example.com/api/internal/r2-webhook \
+  --header 'x-worker-secret: <WORKER_SECRET>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "r2Key": "temp/f7e8d9c0-b1a2-3456-7890-abcdef123456.jpg"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200 (completed)
+{
+  "ok": true,
+  "fileId": "f7e8d9c0-b1a2-3456-7890-abcdef123456"
+}
+```
+
+```json 200 (already completed)
+{
+  "ok": true,
+  "alreadyCompleted": true
+}
+```
+
+```json 200 (no matching record)
+{
+  "ok": true,
+  "skipped": true
+}
+```
+
+```json 400
+{ "error": "r2Key required" }
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 422
+{ "ok": false, "error": "Object not in R2" }
+```
+
+</ResponseExample>
+
+---
+
+## POST /api/internal/orphan-sweep
+
+Deletes `PENDING` `File` records that were created more than 24 hours ago. For each orphan, the corresponding R2 object is deleted and the database record is marked `FAILED` with `failureReason: "orphan_sweep: PENDING for >24h"`.
+
+Called by a Cloudflare Worker cron trigger, typically scheduled daily at 2 AM UTC. Individual failures do not stop the sweep — errors are collected and returned alongside the cleaned count.
+
+**Authentication:** `x-worker-secret` header
+
+### Headers
+
+<ParamField header="x-worker-secret" type="string" required>
+  Must match the `WORKER_SECRET` environment variable exactly.
+</ParamField>
+
+### Body
+
+No request body required.
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` when the sweep completed (even if some individual deletions failed).
+</ResponseField>
+
+<ResponseField name="cleaned" type="number" required>
+  The number of orphaned `File` records successfully deleted from R2 and marked `FAILED` in the database.
+</ResponseField>
+
+<ResponseField name="errors" type="string[]">
+  Present only when one or more individual deletions failed. Each entry is a string in the format `"<fileId>: <error message>"`. The sweep continues past these failures.
+</ResponseField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://yourapp.example.com/api/internal/orphan-sweep \
+  --header 'x-worker-secret: <WORKER_SECRET>'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "ok": true,
+  "cleaned": 3
+}
+```
+
+```json 200 (with errors)
+{
+  "ok": true,
+  "cleaned": 2,
+  "errors": [
+    "a1b2c3d4-e5f6-7890-abcd-ef1234567890: NoSuchKey: The specified key does not exist."
+  ]
+}
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+</ResponseExample>
+
+---
+
+## POST /api/register
+
+Creates a new student account. Accepts `multipart/form-data`. Creates a `Parent` record (upserted by email + phone), a `Child` record, and a `Payment` record in a single database transaction.
+
+This endpoint is rate-limited by IP address.
+
+**Authentication:** None
+
+### Body (multipart/form-data)
+
+<ParamField body="childFirstName" type="string" required>
+  Child's first name. 1–64 characters.
+</ParamField>
+
+<ParamField body="childLastName" type="string" required>
+  Child's last name. 1–64 characters.
+</ParamField>
+
+<ParamField body="grade" type="number" required>
+  The child's school grade. Integer between `1` and `8` inclusive.
+</ParamField>
+
+<ParamField body="dateOfBirth" type="string" required>
+  The child's date of birth in `YYYY-MM-DD` format. Must be in the past and within a reasonable age range (not more than 25 years ago).
+</ParamField>
+
+<ParamField body="parentFirstName" type="string" required>
+  Parent's first name. 1–64 characters.
+</ParamField>
+
+<ParamField body="parentLastName" type="string" required>
+  Parent's last name. 1–64 characters.
+</ParamField>
+
+<ParamField body="parentEmail" type="string" required>
+  Parent's email address. Must be a valid email, maximum 254 characters. Stored in lowercase.
+</ParamField>
+
+<ParamField body="parentPhone" type="string" required>
+  Parent's phone number. 7–20 characters.
+</ParamField>
+
+<ParamField body="paymentMethod" type="string" required>
+  Payment verification method. One of: `transaction_id`, `receipt_upload`.
+</ParamField>
+
+<ParamField body="transactionId" type="string">
+  Required when `paymentMethod` is `transaction_id`. The payment transaction ID string. Maximum 128 characters.
+</ParamField>
+
+<ParamField body="receiptFileId" type="string">
+  Required when `paymentMethod` is `receipt_upload`. The `fileId` of a `File` record with `uploadStatus: COMPLETED`. Upload the receipt first using the [presign/confirm flow](/api/upload/presign-confirm) with `context: "receipt"` before submitting registration.
+</ParamField>
+
+<ParamField body="subjects" type="string">
+  Optional comma-separated list of the child's favourite subjects. Values not in the allowed list are silently discarded. Allowed values: `English`, `Mathematics`, `Science`, `Social Studies`, `Arts`, `Music`, `Physical Education`, `Technology`.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="childId" type="string" required>
+  The ID of the newly created `Child` record.
+</ResponseField>
+
+<ResponseField name="paymentId" type="string" required>
+  The ID of the newly created `Payment` record.
+</ResponseField>
+
+### Initial record state
+
+- `Child.status` is set to `pending_payment`.
+- `Payment.status` is set to `pending`.
+- The `Parent` record is upserted by `(email, phone)` — if a parent with the same email and phone already exists, their name fields are updated.
+- When `paymentMethod` is `receipt_upload`, the `File` record's `uploadedByChildId` is set to the new child's ID.
+
+<RequestExample>
+
+```bash cURL (transaction ID)
+curl --request POST \
+  --url https://yourapp.example.com/api/register \
+  --form 'childFirstName=Alex' \
+  --form 'childLastName=Smith' \
+  --form 'grade=3' \
+  --form 'dateOfBirth=2017-06-15' \
+  --form 'parentFirstName=Jordan' \
+  --form 'parentLastName=Smith' \
+  --form 'parentEmail=jordan@example.com' \
+  --form 'parentPhone=+12025550100' \
+  --form 'paymentMethod=transaction_id' \
+  --form 'transactionId=TXN-20260325-00042' \
+  --form 'subjects=English,Mathematics,Science'
+```
+
+```bash cURL (receipt upload)
+curl --request POST \
+  --url https://yourapp.example.com/api/register \
+  --form 'childFirstName=Alex' \
+  --form 'childLastName=Smith' \
+  --form 'grade=3' \
+  --form 'dateOfBirth=2017-06-15' \
+  --form 'parentFirstName=Jordan' \
+  --form 'parentLastName=Smith' \
+  --form 'parentEmail=jordan@example.com' \
+  --form 'parentPhone=+12025550100' \
+  --form 'paymentMethod=receipt_upload' \
+  --form 'receiptFileId=f7e8d9c0-b1a2-3456-7890-abcdef123456' \
+  --form 'subjects=English,Arts'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "ok": true,
+  "childId": "d4e5f6a7-b8c9-0123-def0-123456789abc",
+  "paymentId": "p1a2b3c4-d5e6-7890-f012-345678901234"
+}
+```
+
+```json 400
+{ "error": "Receipt file not found." }
+```
+
+```json 400
+{ "error": "Receipt upload is still processing. Please wait and try again." }
+```
+
+```json 429
+{ "error": "Too many registration attempts. Please try again later." }
+```
+
+```json 500
+{ "error": "Server error" }
+```
+
+</ResponseExample>

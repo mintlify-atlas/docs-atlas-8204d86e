@@ -1,0 +1,171 @@
+---
+title: "Student registration"
+description: "How parents register a child for the Literacy Platform: filling out the registration form, submitting payment proof, and what happens while waiting for admin approval."
+---
+
+Registration is the first step in the student lifecycle. A parent fills in the child's details and provides proof of payment. The account is created in `pending_payment` status and an admin reviews it before any login credentials are issued.
+
+## Account state machine
+
+Every child account moves through the following states:
+
+| Status | Meaning |
+|---|---|
+| `pending_payment` | Registration submitted, waiting for admin to approve payment |
+| `approved_pending_login` | Payment approved, admin has not yet created login credentials |
+| `assessment_required` | Credentials created, student must complete the initial assessment |
+| `pending_level_review` | Assessment submitted, admin is assigning a literacy level |
+| `active` | Level assigned, student has full access to daily tasks |
+| `rejected` | Payment was rejected by admin |
+
+Registration creates the account at `pending_payment`. The subsequent transitions are all triggered by admin actions.
+
+## Registration form
+
+The registration page is at `/register`. It collects three sections of information.
+
+### Child information
+
+| Field | Validation |
+|---|---|
+| First name | Required, max 64 characters |
+| Last name | Required, max 64 characters |
+| Grade | Required, integer 1–8 |
+| Date of birth | Required, must be in the past, within the last 25 years |
+
+### Favourite subjects (optional)
+
+Students can select any combination of the following subjects:
+
+`English`, `Mathematics`, `Science`, `Social Studies`, `Arts`, `Music`, `Physical Education`, `Technology`
+
+This field is optional. Selections are stored as an array on the child record.
+
+### Parent information
+
+| Field | Validation |
+|---|---|
+| First name | Required, max 64 characters |
+| Last name | Required, max 64 characters |
+| Email | Required, valid email address, max 254 characters |
+| Phone | Required, 7–20 characters |
+
+Parent identity is keyed on the combination of email and phone. If a parent re-registers a second child using the same email and phone, the existing parent record is updated rather than duplicated.
+
+## Payment methods
+
+The form offers two payment methods via a `paymentMethod` selector:
+
+<Tabs>
+  <Tab title="Transaction ID">
+    Select **Transaction ID** and paste the reference number from your bank transfer into the **Transaction ID** field. The value is stored against the payment record for the admin to verify manually.
+
+    The `paymentMethod` value sent to the API is `transaction_id`.
+  </Tab>
+  <Tab title="Receipt upload">
+    Select **Upload Receipt** to upload a scanned or photographed payment receipt directly from your device.
+
+    **Allowed file types:** `image/jpeg`, `image/png`, `image/webp`, `application/pdf`
+
+    **Maximum file size:** 5 MB (5 × 1024 × 1024 bytes)
+
+    The file is uploaded to Cloudflare R2 storage before the registration form is submitted. See [Receipt upload flow](#receipt-upload-flow) for the three-step process.
+
+    The `paymentMethod` value sent to the API is `receipt_upload`.
+  </Tab>
+</Tabs>
+
+## Receipt upload flow
+
+Receipt files are uploaded directly to Cloudflare R2 storage — the app server is never used as a proxy. The three-step flow must complete successfully before the registration form can be submitted.
+
+<Steps>
+  <Step title="Request a presigned URL">
+    The browser sends a `POST` request to `/api/upload/presign` with the file metadata:
+
+    ```json
+    {
+      "context": "receipt",
+      "mimeType": "image/jpeg",
+      "byteSize": 204800,
+      "originalName": "receipt.jpg"
+    }
+    ```
+
+    The server validates the MIME type and byte size, creates a `File` record in `PENDING` status, and returns a short-lived presigned PUT URL along with a `fileId`:
+
+    ```json
+    {
+      "presignedUrl": "https://…r2.cloudflarestorage.com/…",
+      "fileId": "<uuid>",
+      "r2Key": "receipts/…"
+    }
+    ```
+
+    <Note>Receipt uploads are the only context that does not require authentication. The presign endpoint accepts `context: "receipt"` from unauthenticated requests.</Note>
+  </Step>
+  <Step title="Upload the file to R2">
+    The browser `PUT`s the raw file bytes directly to the `presignedUrl` returned in step 1:
+
+    ```
+    PUT <presignedUrl>
+    Content-Type: image/jpeg
+    Content-Length: 204800
+
+    <file bytes>
+    ```
+
+    This request goes directly to Cloudflare R2 — it does not pass through the Next.js server.
+  </Step>
+  <Step title="Confirm the upload">
+    The browser sends a `POST` request to `/api/upload/confirm` to verify the file landed in R2 and mark it `COMPLETED`:
+
+    ```json
+    {
+      "fileId": "<uuid>",
+      "context": "receipt"
+    }
+    ```
+
+    The server checks that the object exists in R2 before updating the `File` record. On success it returns:
+
+    ```json
+    { "ok": true, "fileId": "<uuid>" }
+    ```
+
+    The returned `fileId` is stored in the form and included as `receiptFileId` when the registration is submitted.
+  </Step>
+</Steps>
+
+## Submitting registration
+
+Once all required fields are filled and (if applicable) the receipt upload has completed, the form submits a `POST` request to `/api/upload/presign`.
+
+The registration is sent as `multipart/form-data` to `POST /api/register`. The server:
+
+1. Validates all fields against the registration schema.
+2. For `receipt_upload` payments, confirms the referenced `File` record exists and has `uploadStatus = COMPLETED`.
+3. Upserts the parent record by `(email, phone)`.
+4. Creates the child record with `status: "pending_payment"`.
+5. Creates a `Payment` record linking either the `transactionId` or `receiptFileId`.
+
+On success, the API returns:
+
+```json
+{ "ok": true, "childId": "<uuid>", "paymentId": "<uuid>" }
+```
+
+The page displays: **"Registration submitted. Waiting for admin payment approval."**
+
+## What happens next
+
+After successful registration the account sits at `pending_payment`. No login credentials exist yet.
+
+1. An admin reviews the payment (transaction ID or receipt) in the admin panel.
+2. If approved, the payment status moves to `approved` and the child account moves to `approved_pending_login`.
+3. The admin creates login credentials (username and password) for the student. The account moves to `assessment_required`.
+4. **The student receives their username and password.** They can then log in at `/student/login` and complete the initial assessment.
+
+<Warning>
+  Students do not receive credentials automatically. An admin must approve the payment and manually create the login before a student can sign in.
+</Warning>

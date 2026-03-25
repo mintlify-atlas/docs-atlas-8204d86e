@@ -1,0 +1,153 @@
+---
+title: Student Management
+description: Listing, viewing, editing, credentialing, and archiving students across the full account lifecycle.
+---
+
+The students list at `/admin/students` is the primary interface for managing student accounts after registration. It provides search, sort, detail view, profile editing, password reset, and archiving.
+
+## Listing students
+
+```
+GET /api/admin/students
+```
+
+Supported query parameters:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | — | Case-insensitive substring match on `childFirstName`, `childLastName`, `username`, `parent.firstName`, and `parent.lastName`. Max 100 characters. |
+| `sort` | `string` | `name` | Field to sort by. See sort options below. |
+| `order` | `"asc"` \| `"desc"` | `asc` | Sort direction. |
+| `showArchived` | `"true"` \| `"false"` | `false` | Include students where `archivedAt` is not null. |
+
+### Sort options
+
+| `sort` value | Sorted by |
+|---|---|
+| `name` | `childLastName` then `childFirstName` (post-merge sort, supports `asc`/`desc`). |
+| `grade` | `Child.grade` (DB-level `orderBy`). |
+| `status` | `Child.status` (DB-level `orderBy`). |
+| `level` | `Child.level` (DB-level `orderBy`). |
+| `createdAt` | `Child.createdAt` (DB-level `orderBy`). |
+| `rp` | Aggregated `RpEvent.delta` sum (post-merge sort, supports `asc`/`desc`). |
+
+<Note>
+  RP totals are fetched in a single `groupBy` query on the `RpEvent` table — one query for all students in the list, not one per student. The result is merged into the student list in the application layer. This avoids N+1 queries.
+
+  ```ts
+  const rpGroups = await prisma.rpEvent.groupBy({
+    by: ["childId"],
+    where: { childId: { in: children.map((c) => c.id) } },
+    _sum: { delta: true },
+  });
+  ```
+</Note>
+
+## Viewing a student
+
+```
+GET /api/admin/students/[childId]
+```
+
+Returns the full `Child` record including:
+- All profile fields: name, grade, date of birth, username, subjects.
+- Timestamps: `createdAt`, `credentialsCreatedAt`, `levelAssignedAt`, `lastDailySubmissionAt`, `archivedAt`.
+- Parent contact: `firstName`, `lastName`, `email`, `phone`.
+- `status` and `level` (read-only — controlled by the workflow).
+- `totalRp`: the sum of all `RpEvent.delta` values for this student, calculated with a single aggregate query.
+
+## Student lifecycle
+
+<Steps>
+  <Step title="Registration">
+    A parent registers and submits a payment. The student's `status` starts as `pending_payment`.
+  </Step>
+  <Step title="Payment approval">
+    An admin reviews and approves the payment at `/admin/payments`. Status moves to `approved_pending_login`. See the [Payment Management](/admin/payments) guide.
+  </Step>
+  <Step title="Create credentials">
+    The student appears in the Approved Users list at `/admin/approved-users`. The admin sets a username and password:
+
+    ```
+    POST /api/admin/approved-users/[id]/create-credentials
+    ```
+
+    Body: `{ "username": "<string>", "password": "<string>" }`
+
+    Both fields are required. The username must be unique across all students. Status advances to `assessment_required` and a `CREDENTIALS_CREATED` entry is written to `AdminAuditLog`.
+  </Step>
+  <Step title="Student completes initial assessment">
+    The student logs in, completes the initial assessment, and submits it. Status moves to `pending_level_review`.
+  </Step>
+  <Step title="Assign literacy level">
+    The submitted assessment appears in the Assessments queue at `/admin/assessments`. The admin reviews the artifacts and assigns a `LiteracyLevel`:
+
+    ```
+    POST /api/admin/assessments/assign-level
+    ```
+
+    Body: `{ "assessmentId": "<uuid>", "level": "foundational" | "functional" | "transitional" | "advanced" }`
+
+    This atomically updates both `Assessment.assignedLevel` and `Child.level`, sets `Child.status = active`, records `levelAssignedById` and `levelAssignedAt` on the child, and writes a `LEVEL_ASSIGNED` audit log entry. Each assessment can only be assigned once — re-assigning returns HTTP 409.
+  </Step>
+  <Step title="Active student">
+    The student is now `active` and receives daily tasks based on their assigned level. Their RP accumulates as they complete tasks.
+  </Step>
+</Steps>
+
+## Editing a student profile
+
+```
+PATCH /api/admin/students/[childId]
+```
+
+Editable fields:
+
+| Field | Description |
+|---|---|
+| `childFirstName` | Student's first name (max 64 chars). |
+| `childLastName` | Student's last name (max 64 chars). |
+| `grade` | School grade (integer, 1–8). |
+| `dateOfBirth` | Must be in the past and within 25 years. |
+| `subjects` | Array of favourite subject strings (max 8 items). |
+| `parentFirstName` | Parent/guardian first name. |
+| `parentLastName` | Parent/guardian last name. |
+| `parentEmail` | Parent/guardian email. |
+| `parentPhone` | Parent/guardian phone (7–20 chars). |
+
+At least one field must be provided. The `status` and `level` fields are not editable here — they are controlled by the assessment workflow. Username and password changes go through the separate credential endpoints.
+
+Child and parent fields are updated in a single Prisma transaction. A `STUDENT_PROFILE_EDITED` audit log entry records which fields were changed.
+
+## Resetting a password
+
+```
+POST /api/admin/students/[childId]/reset-password
+```
+
+Pass `{ "password": "<string>" }` to set a specific password, or omit the field to have one generated automatically. The new password is returned in the response and must be communicated to the parent — it is not stored in plaintext and will not be shown again.
+
+## Archiving students
+
+Archiving is a soft operation. It sets `Child.archivedAt` to the current timestamp without deleting any data. Archived students:
+- Cannot log in.
+- Are hidden from the default student list (shown only when `showArchived=true` is passed).
+- Retain all their submissions, assessments, and RP events.
+
+To archive or unarchive:
+
+```
+POST /api/admin/students/[childId]/archive
+```
+
+This endpoint **toggles** the archived state — if the student is currently archived it unarchives them, and vice versa. The response includes `{ ok: true, archived: boolean }`.
+
+## Approved Users list
+
+Students in `approved_pending_login` status are surfaced separately at `/admin/approved-users`, which calls:
+
+```
+GET /api/admin/approved-users
+```
+
+This returns all children where `status = approved_pending_login`, ordered by `createdAt` ascending (oldest first). Use this list to ensure no students are left waiting for credentials.

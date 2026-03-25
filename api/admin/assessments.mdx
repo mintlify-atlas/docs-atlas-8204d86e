@@ -1,0 +1,133 @@
+---
+title: "Assessments API"
+description: "Admin endpoints for reviewing student assessments and assigning literacy levels."
+---
+
+Most endpoints require a valid `admin_token` cookie. See individual endpoint notes for exceptions.
+
+## List submitted assessments
+
+```bash
+GET /api/admin/assessments
+```
+
+Returns all **initial** assessments that have been submitted (`submittedAt` is not null), ordered by submission time descending. This is the queue of assessments awaiting admin review.
+
+**Response 200**
+
+```json
+{
+  "assessments": [
+    {
+      "id": "uuid",
+      "submittedAt": "2024-01-20T14:30:00.000Z",
+      "assignedLevel": null,
+      "child": {
+        "id": "uuid",
+        "childFirstName": "Jane",
+        "childLastName": "Smith",
+        "grade": 3,
+        "status": "pending_level_review",
+        "level": null,
+        "parent": {
+          "email": "john@example.com",
+          "phone": "+1234567890"
+        }
+      }
+    }
+  ]
+}
+```
+
+<ResponseField name="assessments" type="array">
+  Array of assessment records.
+  <Expandable title="Assessment fields">
+    <ResponseField name="id" type="string">Assessment UUID.</ResponseField>
+    <ResponseField name="submittedAt" type="string">ISO 8601 timestamp when the student submitted the assessment.</ResponseField>
+    <ResponseField name="assignedLevel" type="string | null">The assigned literacy level, or null if not yet reviewed.</ResponseField>
+    <ResponseField name="child" type="object">The student who submitted the assessment, including parent contact info.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  This endpoint does not require auth in the current implementation — ensure your deployment restricts access appropriately. Assessment artifacts (text responses and audio files) are retrieved via the assessment detail endpoint.
+</Note>
+
+---
+
+## View assessment detail
+
+```bash
+GET /api/admin/assessments/[id]
+```
+
+Returns the full assessment record including all submitted artifacts per skill. Artifacts may contain:
+- `textBody` — text responses (listening, writing)
+- `fileId` — audio file references (reading, speaking) with presigned playback URLs
+
+---
+
+## Assign a literacy level
+
+```bash
+POST /api/admin/assessments/assign-level
+```
+
+Reviews an assessment and assigns a literacy level to the student. This is the final step of the assessment review workflow.
+
+<ParamField body="assessmentId" type="string" required>
+  UUID of the assessment to review.
+</ParamField>
+
+<ParamField body="level" type="string" required>
+  The literacy level to assign: `foundational`, `functional`, `transitional`, or `advanced`.
+</ParamField>
+
+This endpoint atomically:
+1. Updates the `Assessment` record with `assignedLevel`, `reviewedByAdminId`, and `reviewedAt`
+2. Updates the `Child` record: sets `level`, `status → active`, `levelAssignedById`, `levelAssignedAt`
+3. Creates an `AdminAuditLog` entry with action `LEVEL_ASSIGNED`
+
+**Business logic constraints:**
+- The assessment must have `submittedAt` set (student must have submitted)
+- Level can only be assigned once — returns `409` if `assignedLevel` is already set
+
+<Steps>
+  <Step title="Review the assessment">
+    Call `GET /api/admin/assessments` to see the queue of submitted assessments. Open each one to view the student's text responses and listen to audio artifacts.
+  </Step>
+  <Step title="Determine the appropriate level">
+    Based on the assessment artifacts, choose one of the four literacy levels: `foundational`, `functional`, `transitional`, or `advanced`.
+  </Step>
+  <Step title="Assign the level">
+    Call `POST /api/admin/assessments/assign-level` with the `assessmentId` and chosen `level`. The student's account will immediately become `active`.
+  </Step>
+</Steps>
+
+**Response 200**
+
+```json
+{ "ok": true }
+```
+
+**Error responses**
+
+| Status | Meaning |
+|--------|---------|
+| 400 | Assessment has not been submitted yet |
+| 401 | Unauthorized |
+| 404 | Assessment not found |
+| 409 | Level has already been assigned to this assessment |
+| 500 | Server error |
+
+**Example**
+
+```bash
+curl -X POST "https://your-domain.com/api/admin/assessments/assign-level" \
+  -H "Cookie: admin_token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "assessmentId": "ASSESSMENT_UUID",
+    "level": "functional"
+  }'
+```

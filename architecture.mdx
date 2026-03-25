@@ -1,0 +1,223 @@
+---
+title: 'Architecture'
+description: 'System architecture overview for the Literacy Platform — components, data flow, auth model, and Cloudflare Worker responsibilities.'
+---
+
+## High-level overview
+
+The Literacy Platform is a Next.js 16 application backed by PostgreSQL, Cloudflare R2 for file storage, and a Cloudflare Worker that handles asynchronous R2 event processing and scheduled maintenance.
+
+<CardGroup cols={2}>
+  <Card title="Next.js app" icon="layout-dashboard">
+    Serves the admin portal (`/admin/*`), student portal (`/student/*`), and registration flow (`/register`). API routes handle all business logic. Edge middleware enforces authentication on protected routes.
+  </Card>
+  <Card title="PostgreSQL" icon="database">
+    Primary datastore managed via Prisma ORM. A singleton `PrismaClient` instance is reused across hot reloads in development. Migrations are applied with `prisma migrate`.
+  </Card>
+  <Card title="Cloudflare R2" icon="cloud">
+    S3-compatible object storage for receipt images, student audio recordings, assessment artifacts, and admin-uploaded content (PDFs, audio). The AWS SDK v3 (`@aws-sdk/client-s3`) is used to generate presigned PUT and GET URLs.
+  </Card>
+  <Card title="Cloudflare Worker" icon="cpu">
+    Consumes R2 upload event notifications from the `r2-upload-events` queue and runs a daily cron at `0 2 * * *` to sweep orphaned `PENDING` file records older than 24 hours.
+  </Card>
+</CardGroup>
+
+---
+
+## Student account state machine
+
+Every student account (`Child` model) progresses through a strict sequence of states stored in the `AccountStatus` enum. Admins drive state transitions through the admin portal.
+
+```
+pending_payment
+    │
+    │  Admin approves payment
+    ▼
+approved_pending_login
+    │
+    │  Admin creates login credentials
+    ▼
+assessment_required
+    │
+    │  Student submits initial assessment
+    ▼
+pending_level_review
+    │
+    │  Admin reviews assessment and assigns level
+    ▼
+active  ◄────────────────────────────────────┐
+    │                                         │
+    │  Admin may reject at any payment stage  │ Level changed / re-assigned
+    ▼                                         │
+rejected                                      │
+                                   (ongoing periodic assessments)
+```
+
+| Status | Meaning |
+|--------|---------|
+| `pending_payment` | Registration submitted; awaiting payment review. |
+| `approved_pending_login` | Payment approved; admin has not yet created login credentials. |
+| `assessment_required` | Credentials created; student must complete the initial assessment. |
+| `pending_level_review` | Assessment submitted; admin is reviewing to assign a literacy level. |
+| `active` | Level assigned; student has full access to daily tasks. |
+| `rejected` | Account rejected by admin (payment or assessment stage). |
+
+<Note>
+  The `level` field on the `Child` model is `null` until an admin assigns it after reviewing an assessment. Only `active` students have a non-null `level` and can receive daily tasks.
+</Note>
+
+---
+
+## Authentication model
+
+Authentication uses **HS256 JWTs** signed with `JWT_SECRET`, stored in HTTP-only cookies. There are two distinct token types with different payload shapes and separate cookies.
+
+### Token types
+
+| Token | Cookie name | Payload claims | Expiry |
+|-------|-------------|----------------|--------|
+| Admin | `admin_token` | `adminId`, `email`, `role: "admin"` | 24 hours |
+| Student | `student_token` | `childId`, `username`, `role: "student"` | 24 hours |
+
+A student token cannot pass admin verification and vice versa — the `role` claim is checked explicitly in every verifier.
+
+### Two-layer verification
+
+**Edge middleware** (`middleware.ts`) runs on the Next.js edge runtime. It cannot use Node.js crypto APIs, so it performs a **signature-free expiry check** using `atob()` to decode the JWT payload and read the `exp` claim. This is used only for redirect UX: missing token → redirect to login, expired token → redirect with `?expired=1`.
+
+**API route handlers** perform **full cryptographic verification** using `verifyAdminJwt()` or `verifyStudentJwt()` from `lib/auth.ts`. These call `jwt.verify()` from `jsonwebtoken` with the `HS256` algorithm enforced, and additionally validate the payload shape and `role` claim.
+
+<Warning>
+  The middleware is a UX layer only. Never rely on it as the sole authentication check. Every API route handler must call `verifyAdminJwt` or `verifyStudentJwt` directly.
+</Warning>
+
+### Rate limits
+
+Login endpoints are protected by an in-memory sliding window rate limiter (`lib/rateLimit.ts`). Limits are applied per client IP before any database or bcrypt work.
+
+| Endpoint | Window | Max requests |
+|----------|--------|--------------|
+| Student login | 15 minutes | 10 |
+| Admin login | 15 minutes | 5 |
+| Registration | 10 minutes | 5 |
+| Presign | 5 minutes | 20 |
+| Student upload | 5 minutes | 10 |
+| Admin upload | 5 minutes | 30 |
+
+<Info>
+  Rate limiting is disabled entirely when `NODE_ENV=development`. All localhost requests would otherwise share an `"unknown"` IP key and exhaust limits rapidly during development.
+</Info>
+
+---
+
+## File upload flow
+
+Files are uploaded directly from the browser to Cloudflare R2 using presigned PUT URLs. The Next.js server never proxies file bytes.
+
+```
+Browser                    Next.js API              Cloudflare R2          Cloudflare Worker
+   │                            │                         │                       │
+   │── POST /api/presign ───────▶│                         │                       │
+   │   (context, mimeType,      │── validate & sign ──────▶│                       │
+   │    byteSize, ...)          │◀─ presigned PUT URL ─────│                       │
+   │◀── { uploadUrl, fileId } ──│                         │                       │
+   │                            │                         │                       │
+   │── PUT <uploadUrl> ─────────────────────────────────▶│                       │
+   │◀── 200 OK ─────────────────────────────────────────│                       │
+   │                            │                         │                       │
+   │                            │                         │── R2 PutObject event ▶│
+   │                            │                         │   (r2-upload-events   │
+   │                            │                         │    queue)             │
+   │                            │◀── POST /api/internal/r2-webhook ──────────────│
+   │                            │    { r2Key }            │   x-worker-secret     │
+   │                            │                         │                       │
+   │                            │── mark File COMPLETED ──▶│                       │
+   │                            │   link artifact         │                       │
+```
+
+### Upload contexts and constraints
+
+| Context | Allowed MIME types | Max size |
+|---------|-------------------|----------|
+| `receipt` | `image/jpeg`, `image/png`, `image/webp`, `application/pdf` | 5 MB |
+| `assessment_audio` | `audio/webm`, `audio/mpeg` | 10 MB |
+| `daily_audio` | `audio/webm`, `audio/mpeg` | 10 MB |
+| `admin_content` | `application/pdf`, `audio/mpeg` | 50 MB |
+
+Presigned PUT URLs expire after **10 minutes**. Presigned GET URLs (for serving private files like receipts and student audio) expire after **60 seconds** by default.
+
+### File lifecycle and upload status
+
+The `File` model tracks upload state via `UploadStatus`:
+
+- `PENDING` — presigned URL issued, upload not yet confirmed by R2 event.
+- `COMPLETED` — R2 confirmed the file arrived; the associated artifact has been linked.
+- `FAILED` — upload failed or timed out; `failureReason` is populated.
+
+Files are never hard-deleted — the `deletedAt` field is used for soft deletes to preserve referential integrity with content items and artifacts.
+
+---
+
+## Data models overview
+
+<CardGroup cols={2}>
+  <Card title="Admin" icon="shield">
+    Platform administrators. Identified by email address. Linked to audit logs, created content, daily tasks, uploaded files, and payment reviews.
+  </Card>
+  <Card title="Parent" icon="users">
+    Registers via `/register`. Identity is the composite of `email + phone`. One parent can have multiple children.
+  </Card>
+  <Card title="Child" icon="graduation-cap">
+    The student record. Holds the `AccountStatus` state machine, assigned `LiteracyLevel`, admin-assigned `username` and `passwordHash`, and links to assessments, daily submissions, RP events, and uploaded files.
+  </Card>
+  <Card title="Payment" icon="credit-card">
+    One payment record per child. Supports two methods: `receipt_upload` (image/PDF uploaded to R2) or `transaction_id` (manually entered). Status progresses from `pending` → `approved` or `rejected`.
+  </Card>
+  <Card title="ContentItem" icon="file-text">
+    Reusable content library entries. Each item has a `SkillType`, optional `LiteracyLevel`, and a `ContentType`. Payload is one of: `textBody`, `fileId` (R2-hosted asset), or `assetUrl` (external URL). Supports soft delete via `deletedAt`.
+  </Card>
+  <Card title="DailyTask" icon="calendar">
+    Admin-created tasks assigned to a date, skill, and optional level. Carries an `rpValue` (5–20 points, default 10). Links to one or more `ContentItem` records via `DailyTaskContent`.
+  </Card>
+  <Card title="Assessment" icon="clipboard">
+    Per-child assessment record of kind `initial` or `periodic`. Tracks start time, submission time, and the level assigned after admin review. Artifacts (text or file) are stored in `AssessmentArtifact`.
+  </Card>
+  <Card title="RpEvent" icon="star">
+    Append-only RP ledger. Each row records a `delta` and `reason` for a child. The current RP balance is computed by summing all `delta` values for a given `childId`.
+  </Card>
+  <Card title="AdminAuditLog" icon="scroll">
+    Immutable record of every admin action. References the acting admin and optional target entities (child, payment, content, daily task, assessment). Stores additional context in a `metadata` JSON field.
+  </Card>
+</CardGroup>
+
+---
+
+## Cloudflare Worker responsibilities
+
+The Worker (`literacy-platform-worker`) is deployed separately from the Next.js app and has two responsibilities.
+
+### 1. Queue consumer — R2 upload confirmation
+
+The worker subscribes to the `r2-upload-events` Cloudflare Queue. When R2 fires a `PutObject` notification, the worker receives a message containing the object key, size, and ETag, then POSTs to `POST /api/internal/r2-webhook` on the Next.js app with an `x-worker-secret` header for authentication.
+
+The Next.js webhook handler marks the corresponding `File` record as `COMPLETED` and links the uploaded artifact. If the webhook returns a non-2xx response, the worker calls `message.retry()` to re-queue the message. The queue is configured with `max_retries = 3` and a `dead_letter_queue = "r2-upload-events-dlq"` for messages that exhaust retries.
+
+| Queue config | Value |
+|---|---|
+| Queue name | `r2-upload-events` |
+| Max batch size | 10 |
+| Max batch timeout | 5 seconds |
+| Max retries | 3 |
+| Dead-letter queue | `r2-upload-events-dlq` |
+
+### 2. Cron trigger — orphan sweep
+
+A cron trigger fires daily at `0 2 * * *` (02:00 UTC). The worker calls `POST /api/internal/orphan-sweep` on the Next.js app, which finds all `File` records in `PENDING` status older than 24 hours, deletes the corresponding R2 objects, and marks the records as `FAILED`. The sweep result includes a count of cleaned files.
+
+<Info>
+  The orphan sweep uses a Next.js internal endpoint rather than querying the database directly from the Worker. This keeps database logic consolidated in the Next.js app and avoids duplicating Prisma schema in the Worker.
+</Info>
+
+<Note>
+  The Worker uses `WORKER_SECRET` (a Cloudflare Worker secret set via `npx wrangler secret put WORKER_SECRET`) to authenticate calls to internal Next.js endpoints. This value must match the `WORKER_SECRET` environment variable in your Next.js deployment.
+</Note>

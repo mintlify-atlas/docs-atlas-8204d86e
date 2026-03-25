@@ -1,0 +1,94 @@
+---
+title: Content
+description: Endpoint for serving platform content files (PDFs, audio) to authenticated students.
+---
+
+## GET /api/student/content/\{fileId\}
+
+Generates a short-lived presigned URL for a content library file and redirects the client to it. The bucket is kept private — this endpoint is the only way students can access platform-hosted content files.
+
+Only files that are currently linked to an active (non-deleted) `ContentItem` can be accessed. Files uploaded by students as submission artifacts cannot be retrieved through this endpoint.
+
+**Authentication:** `student_token` cookie (JWT). The student must have `active` status.
+
+<Note>
+  Content items use one of three payload modes:
+
+  1. **`textBody`** — inline text (passages, prompts, questions). No file request needed; the text is returned directly in the task or assessment content arrays.
+  2. **`fileId` with `storageUrl`** — a file stored in R2, served via this endpoint. Use the `fileId` from the content item to construct the request URL.
+  3. **`assetUrl`** — an externally hosted file (e.g. a cloud-hosted PDF). Link directly to this URL; do not use this endpoint.
+</Note>
+
+### Path parameters
+
+<ParamField path="fileId" type="string" required>
+  The `fileId` from a `ContentItem` object returned by the daily tasks or assessment endpoints.
+</ParamField>
+
+### Response
+
+On success the endpoint returns `302 Found` and redirects to a presigned Cloudflare R2 GET URL. The presigned URL expires in **5 minutes** (300 seconds) — enough time to load a PDF or audio file in the browser.
+
+<ResponseField name="(redirect)" type="302">
+  The `Location` header contains a time-limited presigned URL pointing directly to the R2 object. No JSON body is returned on success.
+</ResponseField>
+
+### Error responses
+
+<ResponseField name="error" type="string">
+  Error message string. Possible values:
+
+  - `"Unauthorized"` — missing or invalid `student_token` cookie (401)
+  - `"Forbidden"` — student account is not `active` (403)
+  - `"Not found"` — no active `ContentItem` linked to this `fileId` (404)
+  - `"File not available"` — the `File` record exists but has no `r2Key` (404)
+</ResponseField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://yourapp.example.com/api/student/content/c1d2e3f4-0000-0000-0000-000000000001 \
+  --cookie 'student_token=<JWT>' \
+  --location
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```http 302
+HTTP/1.1 302 Found
+Location: https://<r2-bucket>.r2.cloudflarestorage.com/content/admin-id/file-id.pdf?X-Amz-Expires=300&...
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 403
+{ "error": "Forbidden" }
+```
+
+```json 404
+{ "error": "Not found" }
+```
+
+</ResponseExample>
+
+---
+
+## Content item payload modes
+
+Content items returned in task and assessment responses carry one of three payload formats:
+
+| Field | Description | When present |
+|---|---|---|
+| `textBody` | Inline text content | `passage_text`, `questions`, `writing_prompt`, `speaking_prompt` |
+| `fileId` | ID of a platform-hosted R2 file | `passage_audio`, `pdf_document` uploaded by an admin |
+| `assetUrl` | URL of an externally hosted file | Assessment defaults and external resources |
+| `mimeType` | MIME type of the file or asset | When `fileId` or `assetUrl` is present |
+
+To serve a file-backed content item, call `GET /api/student/content/{fileId}` using the `fileId` from the content item. The endpoint redirects to a 5-minute presigned R2 URL.
+
+For `assetUrl` items, use the URL directly. For `textBody` items, render the text inline — no additional request is required.

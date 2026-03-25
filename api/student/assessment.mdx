@@ -1,0 +1,198 @@
+---
+title: Assessment
+description: Endpoints for retrieving and submitting the student's initial literacy assessment.
+---
+
+The assessment flow is a two-step process. Students in `assessment_required` status must complete an initial assessment before they can access daily tasks. After submission the student moves to `pending_level_review` status and waits for an admin to review the artifacts and assign a literacy level.
+
+<Steps>
+  <Step title="GET the assessment">
+    Call `GET /api/student/assessment` to receive the `assessmentId` and the default assessment content items (passages, prompts, and questions). The assessment row is created or updated automatically on this call.
+  </Step>
+  <Step title="Upload audio artifacts (optional)">
+    For `reading` and `speaking` prompts, record audio and upload each file using the [presign/confirm upload flow](/api/upload/presign-confirm) with `context: "assessment_audio"`. Pass `assessmentId` and `skill` in the presign body so the file is linked correctly.
+  </Step>
+  <Step title="POST to submit">
+    Call `POST /api/student/assessment/submit` with the `assessmentId` and any written responses. This locks the assessment and transitions the student's account status to `pending_level_review`.
+  </Step>
+</Steps>
+
+---
+
+## GET /api/student/assessment
+
+Returns the student's current assessment and the content items they should respond to. If the student's status is not `assessment_required`, the endpoint returns `409` with the current status.
+
+This call upserts the `Assessment` record (kind `initial`) and sets `startedAt` if not already set.
+
+**Authentication:** `student_token` cookie (JWT)
+
+### Response
+
+<ResponseField name="assessmentId" type="string" required>
+  The ID of the `Assessment` record. Pass this value in subsequent upload and submit requests.
+</ResponseField>
+
+<ResponseField name="content" type="array" required>
+  Default assessment content items, ordered by skill then creation date.
+
+  <Expandable title="content item properties">
+    <ResponseField name="id" type="string">Content item ID.</ResponseField>
+    <ResponseField name="title" type="string">Content title.</ResponseField>
+    <ResponseField name="description" type="string">Optional description.</ResponseField>
+    <ResponseField name="skill" type="string">`reading`, `listening`, `writing`, or `speaking`.</ResponseField>
+    <ResponseField name="type" type="string">`passage_text`, `passage_audio`, `questions`, `writing_prompt`, `speaking_prompt`, or `pdf_document`.</ResponseField>
+    <ResponseField name="textBody" type="string">Inline text payload for text-based content types.</ResponseField>
+    <ResponseField name="assetUrl" type="string">URL for externally hosted assets (e.g. assessment PDFs).</ResponseField>
+    <ResponseField name="mimeType" type="string">MIME type when an asset or file is present.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="blocked" type="boolean">
+  `true` when the student's status is not `assessment_required`. An HTTP `409` is returned.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  The student's current `AccountStatus` value, returned alongside `blocked: true`.
+</ResponseField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://yourapp.example.com/api/student/assessment \
+  --cookie 'student_token=<JWT>'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "assessmentId": "e3f4a5b6-c7d8-9012-efab-cd3456789012",
+  "content": [
+    {
+      "id": "c1d2e3f4-0000-0000-0000-000000000001",
+      "title": "Reading passage",
+      "description": "Read aloud and record yourself.",
+      "skill": "reading",
+      "type": "passage_text",
+      "textBody": "The cat sat on the mat...",
+      "assetUrl": null,
+      "mimeType": null
+    },
+    {
+      "id": "c1d2e3f4-0000-0000-0000-000000000002",
+      "title": "Writing prompt",
+      "description": null,
+      "skill": "writing",
+      "type": "writing_prompt",
+      "textBody": "Write three sentences about your school day.",
+      "assetUrl": null,
+      "mimeType": null
+    }
+  ]
+}
+```
+
+```json 409 (not in assessment_required status)
+{
+  "blocked": true,
+  "status": "pending_level_review"
+}
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 404
+{ "error": "Not found" }
+```
+
+</ResponseExample>
+
+---
+
+## POST /api/student/assessment/submit
+
+Submits the student's assessment responses, locks the assessment, and transitions the student's account status from `assessment_required` to `pending_level_review`.
+
+Text responses are stored as `AssessmentArtifact` records with `textBody`. Audio artifacts must be uploaded separately before calling this endpoint (see the [upload flow](/api/upload/presign-confirm)). Any previously saved text artifacts for this assessment are replaced; audio file artifacts are preserved.
+
+Only `initial` assessments can be submitted through this endpoint.
+
+**Authentication:** `student_token` cookie (JWT)
+
+### Body
+
+<ParamField body="assessmentId" type="string" required>
+  The assessment ID returned by `GET /api/student/assessment`.
+</ParamField>
+
+<ParamField body="responses" type="object">
+  A map of skill to text response string. Keys are skill names: `reading`, `listening`, `writing`, `speaking`. Include only the skills that have text responses — omit skills where audio was uploaded instead. Each value is trimmed and may be up to 5000 characters. Empty strings are ignored.
+
+  ```json
+  {
+    "listening": "The main character felt nervous because...",
+    "writing": "My favourite subject is science because..."
+  }
+  ```
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+### Side effects
+
+- All prior text artifacts (`fileId = null`) for the assessment are deleted and replaced.
+- Audio file artifacts (where `fileId` is set) are preserved.
+- `Assessment.submittedAt` is set to the current timestamp.
+- `Child.status` transitions from `assessment_required` to `pending_level_review`.
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://yourapp.example.com/api/student/assessment/submit \
+  --cookie 'student_token=<JWT>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "assessmentId": "e3f4a5b6-c7d8-9012-efab-cd3456789012",
+    "responses": {
+      "listening": "The boy was excited to visit his grandmother.",
+      "writing": "My favourite book is about a young explorer."
+    }
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{ "ok": true }
+```
+
+```json 400
+{ "error": "Invalid assessment kind" }
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 404
+{ "error": "Not found" }
+```
+
+```json 409
+{ "error": "Assessment already submitted" }
+```
+
+</ResponseExample>

@@ -1,0 +1,133 @@
+---
+title: 'Environment variables'
+description: 'Reference for all environment variables required to run the Literacy Platform, including database, authentication, R2 storage, and Cloudflare Worker integration.'
+---
+
+## Required variables
+
+All variables listed below are required in production unless marked optional. The application will throw at startup if any required variable is missing.
+
+### Database
+
+<ParamField path="env.DATABASE_URL" type="string" required>
+  PostgreSQL connection string used by Prisma. This value is read by both `prisma.config.ts` at migration time and `@prisma/client` at runtime.
+
+  ```
+  postgresql://user:password@host:5432/literacy_platform
+  ```
+</ParamField>
+
+### Authentication
+
+<ParamField path="env.JWT_SECRET" type="string" required>
+  Secret key used to sign and verify all JWTs with the HS256 algorithm. Both admin tokens (`signAdminJwt`) and student tokens (`signStudentJwt`) are signed with this secret. Tokens expire after **1 day** (`expiresIn: "1d"`).
+
+  ```
+  a3f8c2e1d4b7a9f0e5c8d2b1a6f3e7c4d9b0a5e2f8c1d4b7a0f3e6c9d2b5a8
+  ```
+</ParamField>
+
+<Warning>
+  Never commit `JWT_SECRET` to source control or share it between environments. A compromised secret allows an attacker to forge admin and student tokens. Rotate the secret immediately if it is exposed — all existing sessions will be invalidated.
+</Warning>
+
+<CodeGroup>
+
+```bash Generate with openssl
+openssl rand -hex 32
+```
+
+```bash Generate with Node.js
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+</CodeGroup>
+
+### Cloudflare R2 storage
+
+The platform uses `@aws-sdk/client-s3` to communicate with Cloudflare R2, which exposes an S3-compatible API. All four variables below are required for presigned URL generation and direct object operations.
+
+<ParamField path="env.R2_ENDPOINT" type="string" required>
+  The S3-compatible endpoint for your Cloudflare R2 account. Found in the Cloudflare dashboard under R2 → your bucket → Settings.
+
+  ```
+  https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+  ```
+</ParamField>
+
+<ParamField path="env.R2_ACCESS_KEY_ID" type="string" required>
+  Access key ID for an R2 API token with read and write permissions on the bucket. Generate tokens in the Cloudflare dashboard under R2 → Manage R2 API Tokens.
+
+  ```
+  abc123def456abc123def456abc123de
+  ```
+</ParamField>
+
+<ParamField path="env.R2_SECRET_ACCESS_KEY" type="string" required>
+  Secret access key paired with `R2_ACCESS_KEY_ID`. Only shown once at token creation time.
+
+  ```
+  abc123def456abc123def456abc123def456abc123def456abc123def456abcd
+  ```
+</ParamField>
+
+<ParamField path="env.R2_BUCKET_NAME" type="string" required>
+  Name of the R2 bucket where all platform files are stored. This is the bucket you configured event notifications on for the Cloudflare Worker queue.
+
+  ```
+  literacy-platform-content
+  ```
+</ParamField>
+
+<ParamField path="env.R2_PUBLIC_URL" type="string" required>
+  Base URL used to construct public URLs for admin-uploaded content items (PDFs and audio served to students). Do **not** use this for receipts or student audio — those use presigned GET URLs instead.
+
+  ```
+  https://pub-<hash>.r2.dev
+  ```
+</ParamField>
+
+### Cloudflare Worker integration
+
+<ParamField path="env.WORKER_SECRET" type="string" required>
+  Shared secret between the Cloudflare Worker and the Next.js internal API endpoints (`/api/internal/r2-webhook` and `/api/internal/orphan-sweep`). The Worker sends this value in the `x-worker-secret` request header; the Next.js handlers reject requests where the header does not match.
+
+  ```
+  d9b0a5e2f8c1d4b7a0f3e6c9d2b5a8a3f8c2e1d4b7a9f0e5c8d2b1a6f3e7c4
+  ```
+</ParamField>
+
+<ParamField path="env.NEXT_APP_URL" type="string" required>
+  The public base URL of the Next.js application. Used by the Cloudflare Worker to call webhook endpoints. Must not have a trailing slash.
+
+  ```
+  https://app.yourdomain.com
+  ```
+</ParamField>
+
+---
+
+## Token expiry
+
+Both admin and student JWTs are signed with `expiresIn: "1d"`. Sessions are not refreshed automatically — users must re-authenticate after 24 hours. This applies to:
+
+- Admin tokens (`adminId`, `email`, `role: "admin"`)
+- Student tokens (`childId`, `username`, `role: "student"`)
+
+If you need longer sessions, change the `expiresIn` value in `lib/auth.ts` and re-deploy.
+
+---
+
+## Development vs production
+
+| Concern | Development | Production |
+|---|---|---|
+| `.env` file | Use `.env.local` (gitignored by `.gitignore`) | Set variables in your hosting platform's secret store |
+| `JWT_SECRET` | Any non-empty string | Minimum 32 bytes of random data (see generation commands above) |
+| `DATABASE_URL` | Local PostgreSQL instance | Managed PostgreSQL (e.g., Neon, Supabase, RDS) |
+| `NEXT_APP_URL` | `http://localhost:3000` | Your production domain |
+| Rate limiting | Disabled — all requests are allowed regardless of IP | Active — in-memory sliding window per IP |
+
+<Note>
+  The in-process rate limiter in `lib/rateLimit.ts` is automatically disabled when `NODE_ENV=development`. This prevents false positives caused by all localhost requests sharing the same IP key.
+</Note>

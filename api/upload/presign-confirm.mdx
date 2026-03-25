@@ -1,0 +1,304 @@
+---
+title: File uploads
+description: Three-step presign, upload, and confirm flow for uploading files directly to Cloudflare R2.
+---
+
+Files are uploaded directly from the client to Cloudflare R2 using presigned PUT URLs. The Next.js server issues a time-limited URL and creates a `File` record, but never receives the file bytes.
+
+<Note>
+  File bytes never pass through the Next.js server. The client uploads directly to R2 using the presigned URL. This keeps the server stateless and avoids memory and timeout constraints on large files.
+</Note>
+
+## Upload flow
+
+<Steps>
+  <Step title="Request a presigned URL">
+    Call `POST /api/upload/presign` with the file metadata. The server validates the request, creates a `File` record with `uploadStatus: PENDING`, and returns a presigned R2 PUT URL and the new `fileId`.
+  </Step>
+  <Step title="Upload to R2">
+    PUT the file bytes directly to the presigned URL. Set `Content-Type` to the file's MIME type. Do not send this request to your Next.js server.
+  </Step>
+  <Step title="Confirm the upload">
+    Call `POST /api/upload/confirm` with the `fileId` and `context`. The server verifies the file exists in R2 using a HEAD request, then updates the `File` record to `uploadStatus: COMPLETED`. If a Cloudflare Worker is configured, it may complete this step automatically via the [r2-webhook](/api/internal/webhooks) — the confirm endpoint is idempotent and safe to call even if the Worker already processed the file.
+  </Step>
+</Steps>
+
+---
+
+## POST /api/upload/presign
+
+Issues a presigned R2 PUT URL and creates a `File` record with `uploadStatus: PENDING`.
+
+**Authentication:** Depends on context:
+- `receipt` — no authentication required (called during registration before the student account exists)
+- `assessment_audio` — `student_token` cookie required (student must own the assessment)
+- `daily_audio` — `student_token` cookie required (student must be `active` and the task must not be completed)
+- `admin_content` — `admin_token` cookie required
+
+### Body
+
+<ParamField body="context" type="string" required>
+  The upload context. One of: `receipt`, `assessment_audio`, `daily_audio`, `admin_content`.
+</ParamField>
+
+<ParamField body="mimeType" type="string" required>
+  The MIME type of the file. Must be in the allowed list for the given context (see constraints below).
+</ParamField>
+
+<ParamField body="byteSize" type="number" required>
+  File size in bytes. Must be a positive integer within the size limit for the context. Hard ceiling is 100 MB (104857600 bytes).
+</ParamField>
+
+<ParamField body="originalName" type="string" required>
+  The original file name as selected by the user. 1–255 characters.
+</ParamField>
+
+<ParamField body="assessmentId" type="string">
+  Required when `context` is `assessment_audio`. The ID of the assessment the file is being attached to. The assessment must belong to the authenticated student and must not already be submitted.
+</ParamField>
+
+<ParamField body="skill" type="string">
+  Required when `context` is `assessment_audio` or `daily_audio`. The skill this artifact covers: `reading`, `listening`, `writing`, or `speaking`.
+</ParamField>
+
+<ParamField body="taskId" type="string">
+  Required when `context` is `daily_audio`. The ID of the daily task this file is being attached to.
+</ParamField>
+
+### Upload constraints by context
+
+| Context | Allowed MIME types | Max size |
+|---|---|---|
+| `receipt` | `image/jpeg`, `image/png`, `image/webp`, `application/pdf` | 5 MB (5242880 bytes) |
+| `assessment_audio` | `audio/webm`, `audio/mpeg` | 10 MB (10485760 bytes) |
+| `daily_audio` | `audio/webm`, `audio/mpeg` | 10 MB (10485760 bytes) |
+| `admin_content` | `application/pdf`, `audio/mpeg` | 50 MB (52428800 bytes) |
+
+### Response
+
+<ResponseField name="presignedUrl" type="string" required>
+  A presigned R2 PUT URL. Valid for 10 minutes. PUT the file bytes to this URL directly from the client.
+</ResponseField>
+
+<ResponseField name="fileId" type="string" required>
+  The ID of the newly created `File` record. Pass this to `POST /api/upload/confirm` after uploading.
+</ResponseField>
+
+<ResponseField name="r2Key" type="string" required>
+  The R2 object key under which the file will be stored.
+</ResponseField>
+
+<RequestExample>
+
+```bash cURL (receipt upload)
+curl --request POST \
+  --url https://yourapp.example.com/api/upload/presign \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "context": "receipt",
+    "mimeType": "image/jpeg",
+    "byteSize": 204800,
+    "originalName": "payment-receipt.jpg"
+  }'
+```
+
+```bash cURL (daily audio upload)
+curl --request POST \
+  --url https://yourapp.example.com/api/upload/presign \
+  --cookie 'student_token=<JWT>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "context": "daily_audio",
+    "mimeType": "audio/webm",
+    "byteSize": 1048576,
+    "originalName": "reading-response.webm",
+    "taskId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "skill": "reading"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "presignedUrl": "https://<account>.r2.cloudflarestorage.com/temp/uuid.jpg?X-Amz-Expires=600&...",
+  "fileId": "f7e8d9c0-b1a2-3456-7890-abcdef123456",
+  "r2Key": "temp/f7e8d9c0-b1a2-3456-7890-abcdef123456.jpg"
+}
+```
+
+```json 400
+{ "error": "Type image/gif not allowed for receipt. Allowed: image/jpeg, image/png, image/webp, application/pdf" }
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 403
+{ "error": "Forbidden: assessment_audio/daily_audio requires student" }
+```
+
+```json 409
+{ "error": "Task already submitted" }
+```
+
+```json 429
+{ "error": "Too many requests" }
+```
+
+</ResponseExample>
+
+---
+
+## PUT \{presignedUrl\}
+
+Upload file bytes directly to Cloudflare R2 using the presigned URL returned by the presign endpoint. This request goes directly to R2 — do not proxy it through your Next.js server.
+
+**Authentication:** The presigned URL contains a signed credential. No additional authentication headers are required.
+
+### Headers
+
+<ParamField header="Content-Type" type="string" required>
+  Must match the `mimeType` used in the presign request.
+</ParamField>
+
+<ParamField header="Content-Length" type="number">
+  Should be set to the file size in bytes. Note: browser `fetch()` calls may not allow setting this header directly.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request PUT \
+  --url 'https://<account>.r2.cloudflarestorage.com/temp/uuid.jpg?X-Amz-Expires=600&...' \
+  --header 'Content-Type: image/jpeg' \
+  --data-binary @payment-receipt.jpg
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```http 200
+HTTP/1.1 200 OK
+```
+
+</ResponseExample>
+
+---
+
+## POST /api/upload/confirm
+
+Verifies the file was successfully uploaded to R2 and updates the `File` record to `uploadStatus: COMPLETED`. This endpoint is idempotent — if the Cloudflare Worker already marked the file as completed, this call returns success without modifying the record again.
+
+**Authentication:** Same rules as presign. `receipt` context requires no authentication; all other contexts require the matching token.
+
+### Body
+
+<ParamField body="fileId" type="string" required>
+  The `fileId` returned by `POST /api/upload/presign`.
+</ParamField>
+
+<ParamField body="context" type="string" required>
+  The upload context. Must match the context used in the presign request.
+</ParamField>
+
+<ParamField body="assessmentId" type="string">
+  Required when `context` is `assessment_audio`. Used to link the uploaded file as an `AssessmentArtifact`.
+</ParamField>
+
+<ParamField body="skill" type="string">
+  Required when `context` is `assessment_audio` or `daily_audio`. Used to create or replace the artifact record for the given skill.
+</ParamField>
+
+<ParamField body="taskId" type="string">
+  Required when `context` is `daily_audio`. Used to upsert the `DailySubmission` and link the artifact.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="fileId" type="string" required>
+  The confirmed `fileId`.
+</ResponseField>
+
+### Artifact linking on confirm
+
+When confirm succeeds, the server links the file to the appropriate record depending on context:
+
+| Context | Artifact created |
+|---|---|
+| `receipt` | No auto-linking — the registration endpoint handles this when the form is submitted |
+| `assessment_audio` | `AssessmentArtifact` for the given `assessmentId` and `skill` (replaces any prior file artifact for that skill) |
+| `daily_audio` | `DailySubmissionArtifact` for the given `taskId` and `skill` (upserts the `DailySubmission` row if needed; replaces prior artifact for that skill) |
+| `admin_content` | No auto-linking — admin content routes handle this directly |
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://yourapp.example.com/api/upload/confirm \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "fileId": "f7e8d9c0-b1a2-3456-7890-abcdef123456",
+    "context": "receipt"
+  }'
+```
+
+```bash cURL (assessment audio)
+curl --request POST \
+  --url https://yourapp.example.com/api/upload/confirm \
+  --cookie 'student_token=<JWT>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "fileId": "f7e8d9c0-b1a2-3456-7890-abcdef123456",
+    "context": "assessment_audio",
+    "assessmentId": "e3f4a5b6-c7d8-9012-efab-cd3456789012",
+    "skill": "reading"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "ok": true,
+  "fileId": "f7e8d9c0-b1a2-3456-7890-abcdef123456"
+}
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 403
+{ "error": "Forbidden" }
+```
+
+```json 404
+{ "error": "File not found" }
+```
+
+```json 422
+{ "error": "File not found in storage. Upload may have failed." }
+```
+
+</ResponseExample>
+
+---
+
+## UploadStatus values
+
+| Value | Description |
+|---|---|
+| `PENDING` | Presigned URL has been issued. The file has not yet been confirmed in R2. |
+| `COMPLETED` | File confirmed present in R2. `storageUrl` is set on the `File` record. |
+| `FAILED` | Upload failed or timed out. PENDING records older than 24 hours are marked `FAILED` by the orphan sweep. |

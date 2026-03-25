@@ -1,0 +1,207 @@
+---
+title: "Daily tasks"
+description: "How students view and complete their daily literacy tasks, how Reward Points are earned, and how the submission and RP ledger work."
+---
+
+Once a student's account reaches `active` status, they receive daily skill-based learning tasks. Completing a task earns Reward Points (RP), which are tracked in an immutable ledger.
+
+## How tasks are structured
+
+Admins create `DailyTask` records with the following properties:
+
+| Field | Description |
+|---|---|
+| `taskDate` | The calendar date the task is active (stored as `00:00 UTC`) |
+| `skill` | One of `reading`, `listening`, `writing`, `speaking` |
+| `level` | A specific literacy level, or `NULL` to apply to all levels |
+| `rpValue` | RP awarded on completion — configurable by admin, default `10` |
+
+A task with `level = NULL` appears for every active student regardless of their assigned level. A task with a specific level only appears for students at that level.
+
+### RP value range
+
+| Minimum | Default | Maximum |
+|---|---|---|
+| 5 RP | 10 RP | 20 RP |
+
+The `rpValue` is set by the admin when creating or editing a task. The database column defaults to `10`.
+
+## Viewing today's tasks
+
+The student dashboard (`/student`) fetches tasks for the current UTC date filtered to the student's level:
+
+```
+GET /api/student/daily-tasks
+```
+
+The API returns only tasks where `taskDate` equals today's UTC date and where `level` is either `NULL` or matches the student's assigned level. Tasks are returned in creation order.
+
+Example response:
+
+```json
+{
+  "tasks": [
+    {
+      "id": "<uuid>",
+      "taskDate": "2026-03-25T00:00:00.000Z",
+      "skill": "reading",
+      "level": "transitional",
+      "isCompleted": false,
+      "submittedAt": null
+    },
+    {
+      "id": "<uuid>",
+      "taskDate": "2026-03-25T00:00:00.000Z",
+      "skill": "writing",
+      "level": null,
+      "isCompleted": true,
+      "submittedAt": "2026-03-25T09:14:22.000Z"
+    }
+  ]
+}
+```
+
+If the student's account is not `active`, the API returns `{ "tasks": [], "blocked": true, "reason": "not_active" }` — no error is thrown.
+
+## Completing a task
+
+Each task is completed on its individual page at `/student/tasks/[taskId]`. The page loads the task details, attached content items, and any existing submission via `GET /api/student/daily-tasks/[taskId]`.
+
+The response shape is:
+
+```json
+{
+  "task": { "id": "…", "skill": "reading", "level": "transitional", "taskDate": "…" },
+  "content": [ { "id": "…", "title": "…", "textBody": "…", "assetUrl": null } ],
+  "existingSubmission": null
+}
+```
+
+### Submission flow
+
+<Steps>
+  <Step title="Review the task content">
+    Content items attached to the task are displayed on the page. Text content renders inline; audio files render an `<audio>` player; other files show a link.
+  </Step>
+  <Step title="Prepare your response">
+    The required response type depends on the task's skill:
+
+    | Skill | Response type |
+    |---|---|
+    | `reading` | Audio recording (microphone, `audio/webm`, max 10 MB, max 10 min) |
+    | `speaking` | Audio recording (microphone, `audio/webm`, max 10 MB, max 10 min) |
+    | `listening` | Text written in a textarea (max 5000 characters) |
+    | `writing` | Text written in a textarea (max 5000 characters) |
+
+    For audio tasks, record directly in the browser. You can delete and re-record until you submit.
+  </Step>
+  <Step title="Upload audio (reading and speaking only)">
+    Audio recordings use the same presigned upload flow as assessment audio:
+
+    ```json
+    POST /api/upload/presign
+    {
+      "context": "daily_audio",
+      "mimeType": "audio/webm",
+      "byteSize": 524288,
+      "originalName": "reading.webm",
+      "taskId": "<taskId>",
+      "skill": "reading"
+    }
+    ```
+
+    Then `PUT` the bytes to the presigned URL, then confirm:
+
+    ```json
+    POST /api/upload/confirm
+    {
+      "fileId": "<fileId>",
+      "context": "daily_audio",
+      "taskId": "<taskId>",
+      "skill": "reading"
+    }
+    ```
+
+    The confirm endpoint creates a `DailySubmissionArtifact` record linking the file to the submission for that skill.
+  </Step>
+  <Step title="Submit the task">
+    Once the artifact is ready, the page calls:
+
+    ```json
+    POST /api/student/daily-tasks/[taskId]/submit
+
+    {
+      "textResponse": "The passage was about…"
+    }
+    ```
+
+    For `reading` and `speaking` tasks, `textResponse` is `null`. The server checks that an audio artifact has already been linked via the confirm step.
+
+    The server:
+    1. Verifies the student is `active` and the task matches their level.
+    2. Attaches the text artifact for `listening`/`writing` tasks.
+    3. Confirms the required artifact is present.
+    4. Marks the `DailySubmission` as `isCompleted = true`, records `submittedAt` and `rpEarned`.
+    5. Creates an `RpEvent` ledger entry.
+    6. Updates `lastDailySubmissionAt` on the child record.
+
+    On success:
+
+    ```json
+    { "ok": true, "rpEarned": 10 }
+    ```
+  </Step>
+</Steps>
+
+## DailySubmission model
+
+Each submission is tracked by a `DailySubmission` record:
+
+| Field | Description |
+|---|---|
+| `childId` | The student who made the submission |
+| `dailyTaskId` | The task being submitted |
+| `submittedAt` | Timestamp of submission (null until submitted) |
+| `isCompleted` | `true` once submitted and locked |
+| `rpEarned` | RP awarded, copied from `task.rpValue` at submission time |
+
+<Note>
+  There is a unique constraint on `(childId, dailyTaskId)`. A student can only have one submission record per task. Once `isCompleted` is `true`, the submission is locked — re-submitting returns `409 Already submitted`.
+</Note>
+
+### DailySubmissionArtifact model
+
+Each submission stores one artifact per skill type:
+
+| Field | Description |
+|---|---|
+| `dailySubmissionId` | Parent submission |
+| `skill` | The skill this artifact is for (`reading`, `listening`, `writing`, `speaking`) |
+| `textBody` | Populated for `listening` and `writing` responses |
+| `fileId` | Populated for `reading` and `speaking` responses — references the R2-stored audio file |
+
+Artifacts can be replaced up until the submission is locked. When a new audio file is confirmed via `/api/upload/confirm`, any previous artifact for that skill is deleted and a new one is created.
+
+## RP ledger
+
+Every completed task creates an `RpEvent` record:
+
+| Field | Description |
+|---|---|
+| `childId` | The student who earned the RP |
+| `dailySubmissionId` | The submission that triggered this event |
+| `delta` | RP earned (equal to `task.rpValue`, between 5 and 20) |
+| `reason` | Always `"daily_completion"` for task completions |
+| `createdAt` | Immutable creation timestamp |
+
+RP events are never updated or deleted. The student's total RP is calculated by summing the `delta` field across all their `RpEvent` records.
+
+The student dashboard displays the running total next to a star icon.
+
+## Inactivity tracking
+
+Every time a student successfully submits a task, the `lastDailySubmissionAt` field on the child record is updated to the current timestamp.
+
+<Info>
+  Admins can view a list of students who have not submitted any task in the last 24 hours using the `lastDailySubmissionAt` field. This field is indexed in the database for efficient querying.
+</Info>

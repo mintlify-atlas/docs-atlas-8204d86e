@@ -1,0 +1,137 @@
+---
+title: 'Introduction'
+description: 'An overview of the Literacy Platform — who uses it, how it works, and the core concepts behind levels, skills, rewards, and content.'
+---
+
+## What is the Literacy Platform?
+
+The Literacy Platform is an admin-controlled SaaS application for children's literacy education. It is built with Next.js and designed around a supervised, structured learning flow where administrators control every stage of a student's journey — from registration approval through level assignment to daily task delivery.
+
+### Who uses it?
+
+**Admins** manage the platform end-to-end through the `/admin` portal. They review payment submissions, create student login credentials, review assessments, assign literacy levels, build the content library, and schedule daily tasks. Every significant admin action is recorded in an immutable audit log.
+
+**Parents** register their child at `/register` by submitting parent contact details and child information. After registration they wait for an admin to approve the payment and issue login credentials for the child.
+
+**Students (children)** access the platform at `/student` using credentials created by an admin. They complete daily tasks across four skill types, submit assessments, and earn reward points for task completion.
+
+---
+
+## Literacy levels
+
+Every active student is assigned one of four literacy levels by an admin after reviewing the student's initial assessment. The level determines which daily tasks and content items are surfaced to the student.
+
+<AccordionGroup>
+  <Accordion title="Foundational">
+    The entry-level tier for students who are at the earliest stages of literacy development. Content at this level focuses on fundamental recognition, phonics, and basic comprehension. Students assigned `foundational` typically need structured support across all four skill areas before progressing.
+  </Accordion>
+  <Accordion title="Functional">
+    For students who have basic literacy skills and can engage with simple texts and instructions independently. Functional-level content builds on foundational skills with more connected reading passages, guided writing tasks, and listening comprehension exercises.
+  </Accordion>
+  <Accordion title="Transitional">
+    For students moving from basic to independent literacy. At this level, reading passages are longer and more complex, writing prompts require structured responses, and speaking tasks involve more extended expression. Students are developing fluency and stamina across all four skills.
+  </Accordion>
+  <Accordion title="Advanced">
+    For students who read and write independently at or near grade level. Advanced content challenges students with analytical reading, extended writing tasks, and nuanced speaking and listening activities. Admins may schedule periodic assessments to review whether an advanced student should be re-levelled.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  The `level` field on a student's record is `null` until an admin assigns it after reviewing the initial assessment. Students without a level cannot receive daily tasks and remain in the `assessment_required` or `pending_level_review` state.
+</Note>
+
+---
+
+## Skill types
+
+The platform organises all learning activity around four skill types, matching the `SkillType` enum in the data model.
+
+### Skill-to-content mapping
+
+Each content type is suited to specific skills. The table below shows which `ContentType` values are applicable to each `SkillType`.
+
+| Skill | `reading` | `listening` | `writing` | `speaking` |
+|-------|:---------:|:-----------:|:---------:|:----------:|
+| `passage_text` | ✓ | | | |
+| `passage_audio` | | ✓ | | |
+| `questions` | ✓ | ✓ | | |
+| `writing_prompt` | | | ✓ | |
+| `speaking_prompt` | | | | ✓ |
+| `pdf_document` | ✓ | | ✓ | |
+
+**Reading** — Students read text passages or PDF documents and answer comprehension questions.
+
+**Listening** — Students listen to audio passages and answer questions based on what they heard.
+
+**Writing** — Students respond to a writing prompt, submitting a text artifact as their daily submission.
+
+**Speaking** — Students respond to a speaking prompt by recording an audio artifact, which is uploaded directly to Cloudflare R2.
+
+---
+
+## Reward points (RP) system
+
+The platform uses a reward points ledger to motivate students. Points are earned by completing daily tasks.
+
+### How it works
+
+- Each `DailyTask` carries an `rpValue` between 5 and 20 points (default: 10). Admins set this value when creating or editing a task.
+- When a student completes a daily task and submits a `DailySubmission`, an `RpEvent` row is appended to the ledger with a `delta` equal to the task's `rpValue` and a `reason` of `"daily_completion"`.
+- A student's current RP balance is the sum of all `delta` values across their `RpEvent` records.
+
+### The RpEvent ledger model
+
+The `RpEvent` model is an **append-only ledger**. Points are never subtracted by deleting or updating existing rows. Each event records:
+
+| Field | Description |
+|-------|-------------|
+| `childId` | The student who earned the points. |
+| `dailySubmissionId` | The submission that triggered the event (nullable for future manual awards). |
+| `delta` | The number of points awarded (positive integer). |
+| `reason` | A string describing the source. Defaults to `"daily_completion"`. |
+| `createdAt` | Timestamp of the event. |
+
+<Info>
+  The ledger design means historical point data is always preserved even if a daily task or submission is later deleted. The `dailySubmissionId` foreign key is set to `SetNull` on deletion.
+</Info>
+
+---
+
+## Admin audit log
+
+Every significant admin action is recorded in the `AdminAuditLog` table. The log is write-only from the application's perspective — records are never updated or deleted. Each entry captures the acting admin, the action type, optional references to affected entities, and a `metadata` JSON field for additional context.
+
+### Tracked actions
+
+| Action | Triggered when |
+|--------|---------------|
+| `PAYMENT_APPROVED` | Admin approves a student's payment submission. |
+| `PAYMENT_REJECTED` | Admin rejects a student's payment submission. |
+| `CREDENTIALS_CREATED` | Admin creates a username and password for a child. |
+| `LEVEL_ASSIGNED` | Admin assigns an initial literacy level after reviewing an assessment. |
+| `LEVEL_CHANGED` | Admin changes a student's existing literacy level. |
+| `DAILY_SKILL_FOCUS_SET` | Admin creates or updates a daily task's skill focus. |
+| `CONTENT_CREATED` | Admin adds a new item to the content library. |
+| `CONTENT_ASSIGNED` | Admin links a content item to a daily task. |
+| `STUDENT_PROFILE_EDITED` | Admin modifies a student's profile details. |
+
+Each log entry can reference up to five target entities: a child, a payment, a content item, a daily task, and an assessment. All foreign keys use `SetNull` on deletion so audit history is preserved even if the referenced record is removed.
+
+---
+
+## Content types
+
+The content library (`ContentItem`) supports six content types via the `ContentType` enum. Each item belongs to one skill and may be scoped to a specific literacy level or left unscoped to apply across all levels.
+
+| Content type | Description |
+|---|---|
+| `passage_text` | A written text passage for reading tasks. Stored as `textBody`. |
+| `passage_audio` | An audio recording of a passage for listening tasks. Stored as an R2-hosted file (`audio/mpeg`). |
+| `questions` | A set of comprehension questions tied to a reading or listening passage. Stored as `textBody`. |
+| `writing_prompt` | A written prompt that instructs the student what to write. Stored as `textBody`. |
+| `speaking_prompt` | A written or audio prompt that instructs the student what to record. Stored as `textBody` or an R2-hosted file. |
+| `pdf_document` | A PDF document for reading or reference. Stored as an R2-hosted file (`application/pdf`) or an external `assetUrl`. |
+
+<Note>
+  Content items marked `isAssessmentDefault: true` are included in the default initial assessment package delivered to every new student. These are typically managed via external `assetUrl` links to avoid file infrastructure overhead during onboarding.
+</Note>

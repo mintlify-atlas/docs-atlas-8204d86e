@@ -1,0 +1,89 @@
+{
+  "projectType": "saas",
+  "projectName": "Literacy Platform",
+  "projectDescription": "An admin-controlled literacy learning platform for children with structured daily tasks, skill assessments, payment management, and a reward points system.",
+  "theme": "almond",
+  "primaryColor": "#7c7c7c",
+  "lightColor": "#070707",
+  "darkColor": "#c4c4c4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "quickstart", "architecture"]
+          },
+          {
+            "group": "Student Journey",
+            "pages": ["students/registration", "students/assessment", "students/daily-tasks"]
+          },
+          {
+            "group": "Admin Guide",
+            "pages": ["admin/overview", "admin/payments", "admin/content-library", "admin/daily-tasks", "admin/student-management"]
+          },
+          {
+            "group": "Deployment",
+            "pages": ["deployment/environment", "deployment/database", "deployment/cloudflare-worker"]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Authentication",
+            "pages": ["api/auth/admin-login", "api/auth/student-login"]
+          },
+          {
+            "group": "Admin Endpoints",
+            "pages": ["api/admin/students", "api/admin/payments", "api/admin/content", "api/admin/assessments", "api/admin/daily-tasks"]
+          },
+          {
+            "group": "Student Endpoints",
+            "pages": ["api/student/daily-tasks", "api/student/assessment", "api/student/content"]
+          },
+          {
+            "group": "Upload & Files",
+            "pages": ["api/upload/presign-confirm", "api/internal/webhooks"]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Admin-controlled student lifecycle with payment approval flow",
+    "Multi-skill literacy assessments (reading, listening, writing, speaking)",
+    "Daily skill-based learning tasks with reward points (RP) system",
+    "Four literacy levels: foundational, functional, transitional, advanced",
+    "Secure file uploads via Cloudflare R2 presigned URLs",
+    "JWT-based authentication with separate admin and student roles",
+    "Cloudflare Worker for R2 event processing and daily orphan file cleanup",
+    "Full audit log for all admin actions"
+  ],
+  "publicApiSurface": [
+    "POST /api/register",
+    "POST /api/admin/login",
+    "POST /api/student/login",
+    "GET /api/admin/students",
+    "GET /api/admin/students/[childId]",
+    "GET /api/admin/payments",
+    "POST /api/admin/payments/[id]",
+    "GET /api/admin/content",
+    "POST /api/admin/content",
+    "GET /api/admin/assessments",
+    "POST /api/admin/assessments/assign-level",
+    "GET /api/admin/daily-tasks",
+    "POST /api/admin/daily-tasks",
+    "GET /api/student/daily-tasks",
+    "POST /api/student/daily-tasks/[taskId]",
+    "GET /api/student/assessment",
+    "POST /api/student/assessment",
+    "GET /api/student/content",
+    "POST /api/upload/presign",
+    "POST /api/upload/confirm",
+    "POST /api/internal/r2-webhook",
+    "POST /api/internal/orphan-sweep"
+  ]
+}

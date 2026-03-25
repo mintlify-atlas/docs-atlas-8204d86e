@@ -1,0 +1,165 @@
+---
+title: 'Cloudflare Worker'
+description: 'How to configure, deploy, and understand the Cloudflare Worker that handles R2 event notifications and the daily orphan file sweep for the Literacy Platform.'
+---
+
+## Overview
+
+The Worker lives in the `worker/` directory and has two responsibilities:
+
+1. **Queue consumer** — receives R2 event notifications from the `r2-upload-events` queue and calls the Next.js `/api/internal/r2-webhook` endpoint to confirm file uploads in the database.
+2. **Cron trigger** — runs daily at `0 2 * * *` (02:00 UTC) and calls `/api/internal/orphan-sweep` to delete `PENDING` `File` records that were never confirmed within 24 hours.
+
+---
+
+## wrangler.toml configuration
+
+```toml worker/wrangler.toml
+# worker/wrangler.toml
+name = "literacy-platform-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+[[queues.consumers]]
+queue = "r2-upload-events"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "r2-upload-events-dlq"
+
+[triggers]
+crons = ["0 2 * * *"]
+
+[[r2_buckets]]
+binding = "LITERACY_BUCKET"
+bucket_name = "literacy-platform-content"
+
+[vars]
+NEXT_APP_URL = "http://localhost:3000"
+```
+
+`NEXT_APP_URL` is set as a plain `[vars]` entry for local development. Override it with a Wrangler secret for production (see deployment steps below).
+
+---
+
+## Environment bindings
+
+The `Env` interface in `worker/src/index.ts` declares the following bindings. All are required.
+
+| Binding | Type | Description |
+|---|---|---|
+| `WORKER_SECRET` | Secret | Shared secret sent in the `x-worker-secret` header to authenticate internal calls to Next.js |
+| `NEXT_APP_URL` | Variable / Secret | Base URL of the Next.js application (no trailing slash) |
+| `LITERACY_BUCKET` | R2 bucket | R2 bucket binding for direct object operations during orphan deletion |
+| `R2_EVENTS_QUEUE` | Queue | Queue binding for producing or inspecting queue messages (declared but consumed via `queue` handler) |
+| `DATABASE_URL` | Secret | PostgreSQL connection string; used by the Worker if it queries the database directly (e.g., via Hyperdrive) |
+
+---
+
+## R2EventMessage interface
+
+Cloudflare delivers R2 event notifications as messages on the queue. Each message body conforms to this TypeScript interface (from `worker/src/index.ts`):
+
+```typescript worker/src/index.ts
+interface R2EventMessage {
+  account: string;
+  bucket: string;
+  object: {
+    key: string;
+    size: number;
+    etag: string;
+  };
+  action: "PutObject" | "DeleteObject" | "CopyObject";
+  eventTime: string;
+}
+```
+
+---
+
+## Queue consumer
+
+The Worker processes each message in the batch individually:
+
+- Only `PutObject` events are forwarded — `DeleteObject` and `CopyObject` messages are acknowledged and discarded.
+- For `PutObject` events, the Worker calls `POST /api/internal/r2-webhook` with the body `{ r2Key: string }` and the `x-worker-secret` header.
+- On a successful response (`response.ok`), the message is acknowledged with `message.ack()` and removed from the queue.
+- On any non-OK response, the Worker throws an error, which causes `message.retry()` to re-queue the message. The queue retries up to `max_retries = 3` times before routing the message to `r2-upload-events-dlq`.
+
+---
+
+## Cron trigger (orphan sweep)
+
+The scheduled handler fires daily at 02:00 UTC and calls `POST /api/internal/orphan-sweep` with the same `x-worker-secret` header.
+
+The Next.js endpoint finds all `File` records with `uploadStatus = PENDING` that were created more than 24 hours ago and deletes them from R2. It returns `{ cleaned: number }`.
+
+<Note>
+  The orphan sweep handler does **not** throw on failure. If the endpoint returns a non-OK status, the error is logged to the Worker's console but the cron run is considered complete. Cron triggers are not retried the way Queue messages are.
+</Note>
+
+---
+
+## Setup and deployment
+
+<Steps>
+  <Step title="Install Worker dependencies">
+    ```bash
+    cd worker && npm install
+    ```
+  </Step>
+
+  <Step title="Create the queues (one-time)">
+    Create the main event queue and its dead-letter queue:
+
+    <CodeGroup>
+
+    ```bash Create main queue
+    npx wrangler queues create r2-upload-events
+    ```
+
+    ```bash Create dead-letter queue
+    npx wrangler queues create r2-upload-events-dlq
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Configure R2 event notifications (one-time)">
+    Point R2 object-create events at the queue:
+
+    ```bash
+    npx wrangler r2 bucket notification create literacy-platform-content \
+      --event-type object-create --queue r2-upload-events
+    ```
+
+    Replace `literacy-platform-content` with your actual bucket name if it differs.
+  </Step>
+
+  <Step title="Set Worker secrets">
+    Set `WORKER_SECRET` and the production `NEXT_APP_URL` as Wrangler secrets so they are encrypted at rest and never appear in `wrangler.toml`:
+
+    <CodeGroup>
+
+    ```bash Set WORKER_SECRET
+    npx wrangler secret put WORKER_SECRET
+    ```
+
+    ```bash Set NEXT_APP_URL
+    npx wrangler secret put NEXT_APP_URL
+    ```
+
+    </CodeGroup>
+
+    Wrangler will prompt you to enter the secret value interactively.
+  </Step>
+
+  <Step title="Deploy the Worker">
+    From the `worker/` directory:
+
+    ```bash
+    npx wrangler deploy
+    ```
+
+    Wrangler reads `wrangler.toml`, compiles `src/index.ts`, and uploads the Worker to your Cloudflare account.
+  </Step>
+</Steps>

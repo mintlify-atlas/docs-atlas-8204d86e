@@ -1,0 +1,112 @@
+---
+title: Content Library
+description: Creating and managing content items — passages, prompts, audio files, and PDFs — used in daily tasks and assessments.
+---
+
+The content library is the central repository for all educational material on the platform. Content items are linked to daily tasks and to the default initial assessment package. The library is managed at `/admin/content`.
+
+## ContentItem model
+
+| Field | Type | Description |
+|---|---|---|
+| `title` | `String` | Required. Human-readable name shown in task and admin lists. |
+| `description` | `String?` | Optional supporting note for admins. |
+| `skill` | `SkillType` | One of `reading`, `listening`, `writing`, `speaking`. |
+| `level` | `LiteracyLevel?` | `foundational`, `functional`, `transitional`, `advanced`, or `null` (all levels). |
+| `type` | `ContentType` | Determines the payload format and which skills the item is valid for. |
+| `isAssessmentDefault` | `Boolean` | See note below. Default `false`. |
+| `deletedAt` | `DateTime?` | Soft-delete timestamp. `null` means the item is active. |
+| `createdAt` | `DateTime` | Set automatically on creation. |
+
+## ContentType values
+
+The allowed content type for a given skill is enforced in both the API and the UI. Selecting a skill in the upload form automatically restricts the available content types.
+
+| ContentType | Description | Compatible skills |
+|---|---|---|
+| `pdf_document` | A PDF file uploaded to R2. | `reading` |
+| `passage_audio` | An MP3 audio file uploaded to R2. | `listening`, `speaking` |
+| `writing_prompt` | Plain text writing instruction. | `writing` |
+| `speaking_prompt` | Plain text speaking instruction. | `speaking` |
+| `passage_text` | Plain text reading passage. | (reserved — not yet exposed in upload UI) |
+| `questions` | Plain text question bank. | (reserved — not yet exposed in upload UI) |
+
+## Payload modes
+
+Each content item carries exactly one payload. The correct mode is determined by the `type`.
+
+<Tabs>
+  <Tab title="textBody">
+    Used for text-only types: `writing_prompt` and `speaking_prompt`.
+
+    The text content is stored directly in the `textBody` column (max 10,000 characters). No file upload is required.
+
+    The admin enters the text in the form's **Text Content** textarea before saving.
+  </Tab>
+  <Tab title="fileId">
+    Used for file-backed types: `pdf_document` and `passage_audio`.
+
+    The file is uploaded to Cloudflare R2 via a three-step presign flow before the content item is saved:
+
+    1. **Presign** — `POST /api/upload/presign` with `context: "admin_content"`, `mimeType`, `byteSize`, and `originalName`. Returns `{ presignedUrl, fileId }`.
+    2. **PUT to R2** — Send the file bytes directly to `presignedUrl` using a standard `fetch` PUT request with the appropriate `Content-Type` header.
+    3. **Confirm** — `POST /api/upload/confirm` with `{ fileId, context: "admin_content" }`. Marks the `File` record as `COMPLETED`.
+
+    Once confirmed, use the returned `fileId` as the `fileId` field in the `POST /api/admin/content` body. The API validates that the file exists and its `uploadStatus` is `COMPLETED` before creating the content item.
+
+    Accepted MIME types: `application/pdf` for `pdf_document`; `audio/mpeg` for `passage_audio`. Maximum file size: 50 MB.
+  </Tab>
+  <Tab title="assetUrl">
+    Used for externally hosted assets — for example, a PDF stored in a third-party cloud bucket.
+
+    Set `assetUrl` to the full public URL of the asset. This mode is most commonly used for assessment default content, which may be hosted externally to avoid requiring the full file upload infrastructure for initial setup.
+
+    `assetUrl` is set automatically by the API when a `fileId` is provided (it is derived as `/api/student/content/[fileId]`). For purely external URLs, it can be passed directly.
+  </Tab>
+</Tabs>
+
+<Tip>
+  Set `isAssessmentDefault: true` on any content item that should be included in the default initial assessment package shown to all new students. These items are excluded from the daily task content picker and are filtered out when building task content lists (`isAssessmentDefault: false`). Mark this flag for reading passages, listening tracks, and prompts that every student should complete as part of their first assessment.
+</Tip>
+
+## Creating a content item
+
+```
+POST /api/admin/content
+```
+
+Request body:
+
+```json
+{
+  "title": "Foundational Reading Passage 1",
+  "description": "A short passage for foundational-level readers.",
+  "skill": "reading",
+  "level": "foundational",
+  "type": "pdf_document",
+  "fileId": "<uuid from presign/confirm flow>",
+  "mimeType": "application/pdf"
+}
+```
+
+Set `level` to `"all"` (or omit it) to make the item available to students at every level. The API stores `null` in the database when `"all"` is passed.
+
+## Editing a content item
+
+```
+PATCH /api/admin/content
+```
+
+Only `title`, `description`, and `level` are editable after creation. The skill, type, and payload cannot be changed — create a new item instead.
+
+## Soft delete
+
+Content items are never hard-deleted. Archiving sets `deletedAt` to the current timestamp:
+
+```
+DELETE /api/admin/content   { "id": "<uuid>" }
+```
+
+If the item is linked to upcoming daily tasks, the API returns a `warning` response with the list of affected tasks before proceeding. Pass `{ "id": "<uuid>", "force": true }` to archive anyway.
+
+Archived items are hidden from the default list. Pass `includeDeleted=true` to `GET /api/admin/content` to include them.

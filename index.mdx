@@ -1,97 +1,81 @@
 ---
 title: "Introduction"
-description: "Welcome to the new home for your documentation"
+description: "An admin-controlled literacy learning platform for children with structured daily tasks, skill assessments, payment management, and a reward points system."
 ---
 
-## Setting up
+## What is Literacy Platform?
 
-Get your documentation site up and running in minutes.
+Literacy Platform is a full-stack web application built for managing children's literacy education. It provides a structured workflow from student registration through payment approval, initial assessment, and daily skill-based learning tasks — all controlled by an admin team.
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Set up your environment and run the platform in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand the system design and data flow
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Admin Guide" icon="shield-halved" href="/admin/overview">
+    Manage students, payments, content, and tasks
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/auth/admin-login">
+    Explore all REST endpoints with request and response schemas
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## How it works
 
-Everything you need to create world-class documentation.
+The platform operates as an admin-controlled lifecycle with four distinct phases:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+<Steps>
+  <Step title="Registration & Payment">
+    A parent registers their child and submits payment via transaction ID or receipt upload. The account enters `pending_payment` status.
+  </Step>
+  <Step title="Admin Approval">
+    An admin reviews the payment, approves or rejects it, then creates login credentials for the student. The account moves to `approved_pending_login`.
+  </Step>
+  <Step title="Initial Assessment">
+    The student completes a multi-skill assessment (reading, listening, writing, speaking). The admin reviews responses and assigns a literacy level.
+  </Step>
+  <Step title="Daily Learning">
+    The student receives daily skill tasks matched to their literacy level. Completed tasks earn Reward Points (RP), tracked in a ledger.
+  </Step>
+</Steps>
 
-## Need inspiration?
+## Key features
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Four literacy levels" icon="layer-group">
+    Students are placed at foundational, functional, transitional, or advanced based on their assessment results
+  </Card>
+  <Card title="Multi-skill assessments" icon="pen-to-square">
+    Covers all four literacy domains: reading, listening, writing, and speaking
+  </Card>
+  <Card title="Reward Points system" icon="star">
+    Students earn RP for completing daily tasks — every event is recorded in an immutable ledger
+  </Card>
+  <Card title="Secure file uploads" icon="cloud-arrow-up">
+    Receipts and submission artifacts are stored in Cloudflare R2 via presigned URLs — never exposed through the app server
+  </Card>
+  <Card title="JWT authentication" icon="lock">
+    Separate admin and student tokens with role claims — middleware enforces access on every protected route
+  </Card>
+  <Card title="Full audit log" icon="clock-rotate-left">
+    Every admin action (payment approval, level assignment, content creation) is recorded in an append-only audit log
+  </Card>
+</CardGroup>
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Framework | Next.js 16 (App Router) |
+| Database | PostgreSQL via Prisma |
+| File storage | Cloudflare R2 |
+| Background jobs | Cloudflare Workers |
+| Auth | JWT (HS256) via `jsonwebtoken` |
+| Validation | Zod |
+| Styling | Tailwind CSS v4 |
+
+<Note>
+  Literacy Platform is a private SaaS application — it is not published to npm and has no public SDK. All integrations happen via its REST API.
+</Note>

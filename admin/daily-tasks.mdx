@@ -1,0 +1,129 @@
+---
+title: Daily Tasks
+description: Creating daily tasks for students, linking content, setting RP values, reviewing submissions, and monitoring inactive students.
+---
+
+Daily tasks are the core unit of student activity. Each task is published by an admin for a specific date and skill, optionally scoped to a literacy level. Students who are `active` and match the task's level (or all-level tasks) see the task in their dashboard.
+
+Daily tasks are managed at `/admin/daily-tasks`.
+
+## DailyTask model
+
+| Field | Type | Description |
+|---|---|---|
+| `taskDate` | `DateTime` | The date the task is active. Stored as UTC midnight. Format: `YYYY-MM-DD`. |
+| `skill` | `SkillType` | One of `reading`, `listening`, `writing`, `speaking`. |
+| `level` | `LiteracyLevel?` | `foundational`, `functional`, `transitional`, or `advanced`. See note below. |
+| `rpValue` | `Int` | Reading Points awarded on completion. Range: 5–20. Default: 10. |
+
+<Note>
+  When `level` is `null`, the task applies to **all active students regardless of their assigned literacy level**. Use this for universal tasks — for example, a school-wide listening activity. Level-specific tasks are delivered only to students whose `Child.level` matches.
+</Note>
+
+### RP value reference
+
+| Property | Value |
+|---|---|
+| Minimum | 5 RP |
+| Maximum | 20 RP |
+| Default | 10 RP |
+
+## Creating a daily task
+
+<Steps>
+  <Step title="Select a date">
+    Navigate to `/admin/daily-tasks`. The date picker defaults to today (`YYYY-MM-DD`). Change it to schedule tasks in advance.
+  </Step>
+  <Step title="Set the level">
+    Choose a `LiteracyLevel` from the dropdown, or leave it as **All levels** to target all active students.
+  </Step>
+  <Step title="Select skills">
+    Check one or more skills (`reading`, `listening`, `writing`, `speaking`). One task record is created per selected skill.
+  </Step>
+  <Step title="Set the RP value">
+    Use the slider to set how many Reading Points students earn for completing the task (5–20). The same RP value applies to all skills selected in this session.
+  </Step>
+  <Step title="Attach content items">
+    For each selected skill, check at least one content item from the list. Content items are filtered to those matching the selected skill. At least one content item per skill is required before saving.
+  </Step>
+  <Step title="Save">
+    Click **Save daily tasks**. This calls:
+
+    ```
+    POST /api/admin/daily-tasks
+    ```
+
+    Body:
+
+    ```json
+    {
+      "date": "2026-03-25",
+      "level": "foundational",
+      "skills": ["reading", "writing"],
+      "contentBySkill": {
+        "reading": ["<contentItemId>"],
+        "writing": ["<contentItemId>"]
+      },
+      "rpValue": 15
+    }
+    ```
+
+    The API creates a `DailyTask` row per skill (or updates the existing one for that date/skill/level combination) and upserts `DailySubmission` rows for all currently eligible active students. Content links are replaced atomically.
+  </Step>
+</Steps>
+
+## DailyTaskContent join model
+
+Content items are linked to tasks through the `DailyTaskContent` join table:
+
+| Field | Description |
+|---|---|
+| `dailyTaskId` | FK to `DailyTask.id`. |
+| `contentItemId` | FK to `ContentItem.id`. |
+
+The composite primary key `(dailyTaskId, contentItemId)` prevents duplicate links. When a task is updated the API clears all existing links (`deleteMany`) and recreates them, so the set of content items always reflects the latest save.
+
+## Reviewing daily submissions
+
+The daily reviews page at `/admin/daily-reviews` lets admins browse student submissions for any date. Select a date to load all tasks for that day, with each student's submission status and artifacts.
+
+The page calls:
+
+```
+GET /api/admin/daily-reviews?date=YYYY-MM-DD
+```
+
+The response groups results by task. Each task block includes:
+- The task metadata (skill, level, date).
+- The list of linked content items.
+- Each eligible student's submission status (`isCompleted`), `rpEarned`, and any artifacts (text body or file).
+
+A summary counter shows how many students have completed tasks out of the total eligible for that date.
+
+## Monitoring inactive students
+
+The inactive students page at `/admin/inactive-students` shows all active students and their task completion status for a chosen date.
+
+```
+GET /api/admin/inactive-students?date=YYYY-MM-DD
+```
+
+The `date` parameter defaults to today. The response returns students who have tasks assigned for that date, each with:
+
+| Field | Description |
+|---|---|
+| `activityStatus` | `"none"` (no tasks started), `"partial"` (some completed), or `"complete"` (all completed). |
+| `totalTasks` | Total tasks assigned to this student for the date. |
+| `completedTasks` | Number of tasks with `isCompleted = true`. |
+| `lastDailySubmissionAt` | Cached timestamp of the student's most recent submission (from `Child.lastDailySubmissionAt`). |
+| `skillBreakdown` | Per-skill completion status and `submittedAt` time. |
+| `parent` | Parent contact details (name, email, phone) for follow-up. |
+
+Students are sorted: `none` first, then `partial`, then `complete`. Students with no tasks assigned on the selected date are excluded from the response.
+
+## Best practices
+
+- Create tasks for every skill (`reading`, `listening`, `writing`, `speaking`) at each level for every active school day. Students whose level has no task for a given skill will see no activity for that skill that day.
+- Set a meaningful RP value to reflect the effort expected. Higher-complexity tasks (e.g. a long reading passage with written response) should award more RP than quick tasks.
+- Attach content items before the school day starts. Tasks are visible to students as soon as they are created.
+- Use the daily reviews page at the end of each day to confirm submissions and identify students who need follow-up.

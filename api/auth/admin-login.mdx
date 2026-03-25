@@ -1,0 +1,176 @@
+---
+title: Admin Login
+description: Authenticate as a platform administrator. Issues an HttpOnly session cookie containing a signed JWT.
+---
+
+## POST /api/admin/login
+
+Verifies admin credentials and sets an `admin_token` session cookie on success. No authentication is required to call this endpoint.
+
+<Warning>
+  The `admin_token` cookie is `HttpOnly` and cannot be read or deleted via
+  `document.cookie` or any JavaScript running in the browser. To log out,
+  the server must clear the cookie — there is currently no dedicated admin
+  logout endpoint, so logout is handled by having the client instruct the
+  server to set `maxAge: 0` on the cookie, or by clearing it server-side in
+  a route handler.
+</Warning>
+
+### Request body
+
+<ParamField body="email" type="string" required>
+  The administrator's email address. Normalized to lowercase and trimmed
+  before lookup. Maximum 254 characters.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The administrator's password. Maximum 128 characters. The 128-character
+  limit prevents denial-of-service via abnormally large inputs to bcrypt.
+</ParamField>
+
+### Responses
+
+<ResponseField name="200 OK" type="object">
+  Credentials are valid. The `admin_token` cookie is set on the response.
+
+  <Expandable title="Response body">
+    <ResponseField name="ok" type="true">
+      Always `true` on success.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="400 Bad Request" type="object">
+  The request body failed schema validation (e.g. missing field, email not
+  a valid email address, password exceeds 128 characters).
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      Human-readable description of the validation failure.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="401 Unauthorized" type="object">
+  No admin account exists for the supplied email, or the password does not
+  match. Both cases return the same generic message to prevent email
+  enumeration.
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      `"Invalid credentials."`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="429 Too Many Requests" type="object">
+  The IP address has exceeded the admin login rate limit: **5 requests per
+  15-minute sliding window**. Rate limiting is disabled in the `development`
+  environment.
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      Human-readable message including the wait time, e.g.
+      `"Too many login attempts. Please try again in 14 minutes."`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="500 Internal Server Error" type="object">
+  An unexpected server-side error occurred.
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      `"Server error"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Cookie set on success
+
+| Attribute  | Value                                      |
+|------------|--------------------------------------------|
+| Name       | `admin_token`                              |
+| `HttpOnly` | `true`                                     |
+| `Secure`   | `true` in production; `false` in development |
+| `SameSite` | `Lax`                                      |
+| `Path`     | `/`                                        |
+| `Max-Age`  | `604800` (7 days)                          |
+
+The cookie holds a **signed HS256 JWT** that expires in **1 day** (controlled
+by the `expiresIn: "1d"` signing option in `lib/auth.ts`). The cookie's
+`Max-Age` of 7 days is intentionally longer so the browser retains the cookie
+until the server can issue a redirect with an `expired=1` query parameter
+rather than silently discarding it.
+
+### JWT payload (`AdminJwtPayload`)
+
+```ts
+{
+  adminId: string;   // UUID of the Admin record in the database
+  email:   string;   // Verified email address
+  role:    "admin";  // Always the literal string "admin"
+  iat:     number;   // Issued-at (Unix timestamp, added by jsonwebtoken)
+  exp:     number;   // Expiry  (Unix timestamp, iat + 86400)
+}
+```
+
+The `role` claim is validated by `verifyAdminJwt` in `lib/auth.ts`. A student
+token cannot pass admin verification even if the other field shapes match.
+
+### Rate limiting
+
+Requests are rate-limited per source IP using an in-memory sliding window
+limiter (`lib/rateLimit.ts`):
+
+- **Limit:** 5 requests per 15-minute window
+- **Keyed by:** first value of the `x-forwarded-for` header, falling back to
+  `x-real-ip`, then `"unknown"`
+- **Disabled in:** `NODE_ENV=development` to prevent exhaustion when all local
+  requests share the `"unknown"` IP key
+
+When the limit is exceeded the response includes a human-readable wait time
+(`"less than a minute"`, `"2 minutes"`, etc.) derived from the oldest timestamp
+still within the current window.
+
+### Admin logout
+
+There is no dedicated `POST /api/admin/logout` route. To end an admin session,
+clear the `admin_token` cookie server-side (set `maxAge: 0`). Because the
+cookie is `HttpOnly`, client-side JavaScript cannot clear it directly.
+
+### Example
+
+```bash
+curl -i -X POST https://example.com/api/admin/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@example.com", "password": "s3cr3t"}'
+```
+
+**Success response**
+
+```http
+HTTP/2 200
+set-cookie: admin_token=<jwt>; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax
+content-type: application/json
+
+{"ok":true}
+```
+
+**Invalid credentials**
+
+```http
+HTTP/2 401
+content-type: application/json
+
+{"error":"Invalid credentials."}
+```
+
+**Rate limited**
+
+```http
+HTTP/2 429
+content-type: application/json
+
+{"error":"Too many login attempts. Please try again in 14 minutes."}
+```

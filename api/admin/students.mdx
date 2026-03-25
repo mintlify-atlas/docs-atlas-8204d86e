@@ -1,0 +1,185 @@
+---
+title: "Students API"
+description: "Admin endpoints for listing and managing student records."
+---
+
+All endpoints require a valid `admin_token` cookie (set on admin login).
+
+## List students
+
+<ParamField query="search" type="string">
+  Case-insensitive search across student first/last name, username, and parent first/last name. Maximum 100 characters.
+</ParamField>
+
+<ParamField query="sort" type="string" default="name">
+  Sort field. One of: `name`, `grade`, `status`, `level`, `createdAt`, `rp`.
+</ParamField>
+
+<ParamField query="order" type="string" default="asc">
+  Sort direction. `asc` or `desc`.
+</ParamField>
+
+<ParamField query="showArchived" type="string" default="false">
+  Set to `true` to include archived students (where `archivedAt` is not null). Archived students are hidden by default.
+</ParamField>
+
+```bash
+GET /api/admin/students
+```
+
+**Response 200**
+
+```json
+{
+  "students": [
+    {
+      "id": "uuid",
+      "childFirstName": "Jane",
+      "childLastName": "Smith",
+      "grade": 3,
+      "status": "active",
+      "level": "functional",
+      "username": "jsmith2024",
+      "createdAt": "2024-01-15T10:00:00.000Z",
+      "archivedAt": null,
+      "parent": {
+        "firstName": "John",
+        "lastName": "Smith"
+      },
+      "totalRp": 150
+    }
+  ]
+}
+```
+
+<ResponseField name="students" type="array">
+  Array of student objects.
+
+  <Expandable title="Student object fields">
+    <ResponseField name="id" type="string">UUID of the child record.</ResponseField>
+    <ResponseField name="childFirstName" type="string">Child's first name.</ResponseField>
+    <ResponseField name="childLastName" type="string">Child's last name.</ResponseField>
+    <ResponseField name="grade" type="number">Grade level (1–8).</ResponseField>
+    <ResponseField name="status" type="string">Account status. One of: `pending_payment`, `approved_pending_login`, `assessment_required`, `pending_level_review`, `active`, `rejected`.</ResponseField>
+    <ResponseField name="level" type="string | null">Literacy level assigned after assessment. One of: `foundational`, `functional`, `transitional`, `advanced`. Null until assigned.</ResponseField>
+    <ResponseField name="username" type="string | null">Login username. Null until credentials are created by admin.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601 timestamp when the child record was created.</ResponseField>
+    <ResponseField name="archivedAt" type="string | null">ISO 8601 timestamp if the student has been archived, otherwise null.</ResponseField>
+    <ResponseField name="parent" type="object">Parent name fields (firstName, lastName).</ResponseField>
+    <ResponseField name="totalRp" type="number">Total reward points earned, aggregated from the RpEvent ledger using a single `groupBy` query (no N+1).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Error responses**
+
+| Status | Meaning |
+|--------|---------|
+| 401 | Missing or invalid `admin_token` cookie |
+| 400 | Invalid query parameter value |
+| 500 | Server error |
+
+**Example**
+
+```bash
+curl -X GET "https://your-domain.com/api/admin/students?sort=rp&order=desc&search=smith" \
+  -H "Cookie: admin_token=<token>"
+```
+
+---
+
+## Get single student
+
+```bash
+GET /api/admin/students/[childId]
+```
+
+Returns the full detail record for one student. Includes all child fields, the parent record (id, firstName, lastName, email, phone), and the student's total RP aggregated from the `RpEvent` ledger.
+
+**Response 200**
+
+```json
+{
+  "child": {
+    "id": "uuid",
+    "childFirstName": "Jane",
+    "childLastName": "Smith",
+    "grade": 3,
+    "dateOfBirth": "2015-04-10T00:00:00.000Z",
+    "username": "jsmith2024",
+    "status": "active",
+    "level": "functional",
+    "subjects": ["English", "Mathematics"],
+    "createdAt": "2024-01-15T10:00:00.000Z",
+    "updatedAt": "2024-02-01T09:00:00.000Z",
+    "credentialsCreatedAt": "2024-01-20T08:00:00.000Z",
+    "levelAssignedAt": "2024-01-25T14:00:00.000Z",
+    "lastDailySubmissionAt": "2024-02-01T09:14:22.000Z",
+    "parent": {
+      "id": "uuid",
+      "firstName": "John",
+      "lastName": "Smith",
+      "email": "john@example.com",
+      "phone": "+12025550100"
+    },
+    "totalRp": 150
+  }
+}
+```
+
+**Error responses**
+
+| Status | Meaning |
+|--------|---------|
+| 401 | Unauthorized |
+| 404 | Student not found |
+
+**Example**
+
+```bash
+curl "https://your-domain.com/api/admin/students/CHILD_UUID" \
+  -H "Cookie: admin_token=<token>"
+```
+
+---
+
+## Edit student profile
+
+```bash
+PATCH /api/admin/students/[childId]
+```
+
+Updates editable fields on the child and/or parent record. At least one field must be provided. Status, level, username, and password cannot be changed through this endpoint — those are managed by dedicated workflow endpoints.
+
+All updates run in a single database transaction. A `STUDENT_PROFILE_EDITED` audit log entry is created recording which fields were changed.
+
+<ParamField body="childFirstName" type="string">Child's first name. 1–64 characters.</ParamField>
+<ParamField body="childLastName" type="string">Child's last name. 1–64 characters.</ParamField>
+<ParamField body="grade" type="number">Grade (1–8).</ParamField>
+<ParamField body="dateOfBirth" type="string">Date of birth. Must be in the past and within 25 years.</ParamField>
+<ParamField body="subjects" type="array">Array of subject strings. Maximum 8 items.</ParamField>
+<ParamField body="parentFirstName" type="string">Parent's first name. 1–64 characters.</ParamField>
+<ParamField body="parentLastName" type="string">Parent's last name. 1–64 characters.</ParamField>
+<ParamField body="parentEmail" type="string">Parent's email. Valid email, max 254 characters.</ParamField>
+<ParamField body="parentPhone" type="string">Parent's phone. 7–20 characters.</ParamField>
+
+**Response 200**: `{ "ok": true }`
+
+---
+
+## Archive student
+
+```bash
+POST /api/admin/students/[childId]/archive
+```
+
+Sets `archivedAt` to the current timestamp. Archived students are excluded from the default students list unless `showArchived=true` is passed.
+
+---
+
+## Reset student password
+
+```bash
+POST /api/admin/students/[childId]/reset-password
+```
+
+Allows an admin to set a new password for a student's login credentials.

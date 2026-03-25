@@ -1,0 +1,235 @@
+---
+title: "Content API"
+description: "Admin endpoints for managing the content library used in assessments and daily tasks."
+---
+
+All endpoints require a valid `admin_token` cookie.
+
+## Content types and skill constraints
+
+Content items are tightly coupled to a skill type. The allowed content types per skill are:
+
+| Skill | Allowed content types |
+|-------|-----------------------|
+| `reading` | `pdf_document` |
+| `listening` | `passage_audio` |
+| `writing` | `writing_prompt` |
+| `speaking` | `speaking_prompt`, `passage_audio` |
+
+<Note>
+  `passage_text` and `questions` exist in the `ContentType` enum but are not yet enforced in the admin content creation flow. Only the types listed above are accepted via the API.
+</Note>
+
+File uploads are required for `pdf_document` and `passage_audio` types. Text-only content types (`writing_prompt`, `speaking_prompt`) use the `textBody` field.
+
+---
+
+## List content items
+
+```bash
+GET /api/admin/content
+```
+
+<ParamField query="skill" type="string">
+  Filter by skill: `reading`, `listening`, `writing`, or `speaking`.
+</ParamField>
+
+<ParamField query="level" type="string">
+  Filter by literacy level: `foundational`, `functional`, `transitional`, `advanced`, or `all`.
+</ParamField>
+
+<ParamField query="includeDeleted" type="string" default="false">
+  Set to `true` to include soft-deleted content items.
+</ParamField>
+
+**Response 200**
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "title": "Phonics Reading Passage",
+      "description": "A foundational reading passage on phonics",
+      "skill": "reading",
+      "level": "foundational",
+      "type": "pdf_document",
+      "textBody": null,
+      "assetUrl": "/api/student/content/uuid",
+      "mimeType": "application/pdf",
+      "isAssessmentDefault": false,
+      "deletedAt": null,
+      "createdAt": "2024-01-15T10:00:00.000Z",
+      "file": {
+        "id": "uuid",
+        "storageUrl": "https://r2-public-url/...",
+        "originalName": "phonics-passage.pdf",
+        "mimeType": "application/pdf",
+        "byteSize": "204800",
+        "uploadStatus": "COMPLETED"
+      }
+    }
+  ]
+}
+```
+
+<Note>
+  `byteSize` is returned as a string to avoid JavaScript BigInt serialization issues.
+</Note>
+
+---
+
+## Create a content item
+
+```bash
+POST /api/admin/content
+```
+
+Rate limited: admin upload rate limit applies.
+
+<ParamField body="title" type="string" required>
+  Display title. 1–255 characters.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Optional description. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="skill" type="string" required>
+  Skill type: `reading`, `listening`, `writing`, or `speaking`.
+</ParamField>
+
+<ParamField body="level" type="string">
+  Literacy level: `foundational`, `functional`, `transitional`, `advanced`, or `all`. Pass `all` or omit to create content available to all levels.
+</ParamField>
+
+<ParamField body="type" type="string" required>
+  Content type. Must be valid for the chosen skill (see table above).
+</ParamField>
+
+<ParamField body="textBody" type="string">
+  Inline text content. Maximum 10,000 characters. Required for `writing_prompt` and `speaking_prompt` types.
+</ParamField>
+
+<ParamField body="fileId" type="string">
+  UUID of a COMPLETED file record (from the presign/confirm upload flow). Required for `pdf_document` and `passage_audio` types.
+</ParamField>
+
+<ParamField body="mimeType" type="string">
+  MIME type of the content (e.g. `application/pdf`, `audio/mpeg`). Maximum 128 characters.
+</ParamField>
+
+<Tabs>
+  <Tab title="Text content (writing prompt)">
+    ```bash
+    curl -X POST "https://your-domain.com/api/admin/content" \
+      -H "Cookie: admin_token=<token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "title": "Describe your morning",
+        "skill": "writing",
+        "level": "foundational",
+        "type": "writing_prompt",
+        "textBody": "Write 3 sentences describing what you do in the morning before school."
+      }'
+    ```
+  </Tab>
+  <Tab title="File content (PDF/audio)">
+    ```bash
+    # First upload the file via presign/confirm, then use the fileId
+    curl -X POST "https://your-domain.com/api/admin/content" \
+      -H "Cookie: admin_token=<token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "title": "Level 1 Reading Passage",
+        "skill": "reading",
+        "level": "foundational",
+        "type": "pdf_document",
+        "fileId": "COMPLETED_FILE_UUID",
+        "mimeType": "application/pdf"
+      }'
+    ```
+  </Tab>
+</Tabs>
+
+**Response 200**
+
+```json
+{
+  "ok": true,
+  "item": {
+    "id": "uuid",
+    "title": "...",
+    "skill": "writing",
+    "level": "foundational",
+    "type": "writing_prompt"
+  }
+}
+```
+
+**Error responses**
+
+| Status | Meaning |
+|--------|---------|
+| 400 | Invalid skill/type combination, missing required file, or file not yet COMPLETED |
+| 401 | Unauthorized |
+| 404 | fileId not found |
+| 429 | Rate limited |
+
+---
+
+## Update a content item
+
+```bash
+PATCH /api/admin/content
+```
+
+<ParamField body="id" type="string" required>
+  UUID of the content item to update.
+</ParamField>
+
+<ParamField body="title" type="string">
+  New title. 1–255 characters.
+</ParamField>
+
+<ParamField body="description" type="string">
+  New description. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="level" type="string">
+  New literacy level. `foundational`, `functional`, `transitional`, `advanced`, or `all`.
+</ParamField>
+
+<Note>
+  Cannot edit archived (soft-deleted) content items. Skill and type cannot be changed after creation.
+</Note>
+
+---
+
+## Delete (archive) a content item
+
+```bash
+DELETE /api/admin/content
+```
+
+<ParamField body="id" type="string" required>
+  UUID of the content item to archive.
+</ParamField>
+
+<ParamField body="force" type="boolean" default="false">
+  If the content is linked to upcoming tasks, pass `force: true` to confirm soft-deletion. Without this, the API returns a warning with affected task details.
+</ParamField>
+
+Content items are **soft-deleted** (the `deletedAt` field is set). They are never hard-deleted because they may be referenced in student submission artifacts and assessment records.
+
+If the content is linked to upcoming daily tasks, the first call without `force: true` returns a `200` with a `warning` field:
+
+```json
+{
+  "warning": true,
+  "message": "This content is linked to 2 upcoming task(s). Students will see it as unavailable. Pass force: true to confirm.",
+  "affectedTasks": [
+    { "taskId": "uuid", "taskDate": "2024-02-01T00:00:00.000Z", "skill": "reading" }
+  ]
+}
+```

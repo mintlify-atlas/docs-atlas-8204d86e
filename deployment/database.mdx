@@ -1,0 +1,158 @@
+---
+title: 'Database setup'
+description: 'How to set up, migrate, seed, and manage the PostgreSQL database for the Literacy Platform using Prisma ORM.'
+---
+
+## Tech stack
+
+The Literacy Platform uses **PostgreSQL** as its database, managed through **Prisma ORM** (`prisma@^6.19.2`, `@prisma/client@^6.19.2`). The Prisma schema is at `prisma/schema.prisma` and the Prisma config at `prisma.config.ts`.
+
+The `DATABASE_URL` environment variable is required by both Prisma at migration time and by the `@prisma/client` at runtime. See [Environment variables](/deployment/environment) for format details.
+
+---
+
+## First-time setup
+
+<Steps>
+  <Step title="Set the DATABASE_URL environment variable">
+    Create a `.env.local` file at the project root (it is gitignored) and add your PostgreSQL connection string:
+
+    ```bash .env.local
+    DATABASE_URL=postgresql://user:password@localhost:5432/literacy_platform
+    ```
+  </Step>
+
+  <Step title="Run migrations">
+    Apply all pending migrations to create the schema:
+
+    ```bash
+    npx prisma migrate deploy
+    ```
+
+    For local development, use `migrate dev` instead — it also regenerates the Prisma client and prompts you to name new migrations:
+
+    ```bash
+    npx prisma migrate dev
+    ```
+  </Step>
+
+  <Step title="Generate the Prisma client">
+    If the client is out of date after pulling new schema changes, regenerate it:
+
+    ```bash
+    npx prisma generate
+    ```
+
+    This is run automatically by `migrate dev` but must be run manually after `migrate deploy`.
+  </Step>
+
+  <Step title="Seed the database">
+    Populate the database with a default admin account and initial content items:
+
+    ```bash
+    npx prisma db seed
+    ```
+
+    This runs `prisma/seed.ts` via `ts-node` (configured in `package.json` under `prisma.seed`). The seed script is idempotent — running it multiple times will not create duplicate records.
+
+    **Default admin credentials created by the seed:**
+    - Email: `admin@local.test`
+    - Password: `Admin123!`
+
+    Change these credentials immediately after the first login in any environment other than local development.
+  </Step>
+</Steps>
+
+---
+
+## Migration commands
+
+| Command | When to use |
+|---|---|
+| `npx prisma migrate dev` | Development — creates a new migration from schema changes, applies it, and regenerates the client |
+| `npx prisma migrate deploy` | Production / CI — applies all pending migrations without prompts or client regeneration |
+| `npx prisma generate` | After `migrate deploy`, or after manually editing the schema without running a migration |
+| `npx prisma db seed` | Initial data population; safe to re-run (idempotent) |
+
+---
+
+## Data models
+
+| Model | Purpose |
+|---|---|
+| `Admin` | Platform administrators who manage content, review payments, and assign levels |
+| `Parent` | Guardian who registers on behalf of a child; identity is the (`email`, `phone`) pair |
+| `Child` | Student account with a state-machine `status` field driving the enrollment workflow |
+| `Payment` | Payment submission (receipt upload or transaction ID) linked one-to-one with a child |
+| `ContentItem` | Reusable content library entries — text, audio, PDF, or writing/speaking prompts |
+| `DailyTask` | Admin-configured daily task for a given skill and date, with an RP point value |
+| `DailyTaskContent` | Join table linking `DailyTask` to one or more `ContentItem` records |
+| `DailySubmission` | A student's attempt at a `DailyTask`; unique per (`childId`, `dailyTaskId`) |
+| `DailySubmissionArtifact` | Individual skill artifact (text or file) submitted as part of a `DailySubmission` |
+| `Assessment` | An assessment (initial or periodic) for a child; unique per (`childId`, `kind`) |
+| `AssessmentArtifact` | Skill artifact attached to an `Assessment` |
+| `RpEvent` | Immutable ledger entry recording RP point changes for a child |
+| `AdminAuditLog` | Append-only log of admin actions with structured `AuditAction` enum values |
+| `File` | Tracks every uploaded file with its R2 key, upload status, and soft-delete timestamp |
+
+### Child enrollment state machine
+
+The `Child.status` field uses the `AccountStatus` enum and moves through the following states:
+
+```
+pending_payment → approved_pending_login → assessment_required
+                                        → pending_level_review → active
+                                        → rejected
+```
+
+---
+
+## Index strategy
+
+The schema includes targeted indexes to support the admin dashboard's most frequent queries:
+
+**Child indexes:**
+- `status` — filter by enrollment state
+- `parentId` — fetch all children for a parent
+- `lastDailySubmissionAt` — identify inactive students (no submission in 24 h)
+- `level` — filter by literacy level
+- `archivedAt` — exclude or surface archived records
+
+**ContentItem and DailyTask indexes:**
+- `(skill, level)` — look up content or tasks by skill and level combination
+- `taskDate` and `(taskDate, level)` on `DailyTask` — fetch today's tasks by level
+
+**File indexes:**
+- `uploadStatus` — query for `PENDING` files during orphan sweep
+- `deletedAt` — exclude soft-deleted files from queries
+
+---
+
+## Soft deletes
+
+Three models use soft deletes rather than hard deletes:
+
+| Model | Soft-delete field | Meaning |
+|---|---|---|
+| `File` | `deletedAt` | File is logically removed but the record is retained so linked artifacts are not orphaned |
+| `ContentItem` | `deletedAt` | Content is hidden from the library but historical task and assessment links remain intact |
+| `Child` | `archivedAt` | Child account is archived rather than deleted; all submission history is preserved |
+
+Never issue a hard delete on these models. Always set the soft-delete field instead.
+
+---
+
+## Cascade and restrict rules
+
+Deleting a `Child` cascades to all directly owned records:
+
+- `Payment` — `onDelete: Cascade`
+- `Assessment` — `onDelete: Cascade`
+- `DailySubmission` — `onDelete: Cascade`
+- `RpEvent` — `onDelete: Cascade`
+
+<Warning>
+  `ContentItem` and `DailyTask` both use `onDelete: Restrict` on their `createdByAdmin` foreign key. Attempting to delete an `Admin` who has created any content items or daily tasks will fail with a foreign key violation. Reassign or soft-delete those records before removing the admin.
+
+  The `AdminAuditLog` model also restricts admin deletion (`onDelete: Restrict`). Audit logs must never be destroyed.
+</Warning>

@@ -1,0 +1,175 @@
+---
+title: "Daily Tasks API"
+description: "Admin endpoints for creating and managing daily skill-based learning tasks."
+---
+
+All endpoints require a valid `admin_token` cookie.
+
+## Get tasks for a date
+
+```bash
+GET /api/admin/daily-tasks?date=2024-01-20&level=foundational
+```
+
+<ParamField query="date" type="string" required>
+  Date in `YYYY-MM-DD` format.
+</ParamField>
+
+<ParamField query="level" type="string">
+  Literacy level filter: `foundational`, `functional`, `transitional`, `advanced`, or `all`. When `all` or omitted, returns tasks with `level = null` (applies to all students).
+</ParamField>
+
+Returns two arrays: existing tasks for the given date/level, and available content items that can be linked to tasks.
+
+**Response 200**
+
+```json
+{
+  "tasks": [
+    {
+      "id": "uuid",
+      "taskDate": "2024-01-20T00:00:00.000Z",
+      "skill": "reading",
+      "level": "foundational",
+      "rpValue": 10,
+      "contentLinks": [
+        {
+          "contentItemId": "uuid",
+          "contentItem": {
+            "id": "uuid",
+            "title": "Phonics Passage",
+            "skill": "reading"
+          }
+        }
+      ]
+    }
+  ],
+  "content": [
+    {
+      "id": "uuid",
+      "title": "Phonics Passage",
+      "skill": "reading",
+      "type": "pdf_document",
+      "level": "foundational"
+    }
+  ]
+}
+```
+
+---
+
+## Create daily tasks
+
+```bash
+POST /api/admin/daily-tasks
+```
+
+Creates one `DailyTask` record per skill in the `skills` array. If a task already exists for the given date/skill/level combination, it updates the `rpValue` and replaces its content links.
+
+After creation, `DailySubmission` records are pre-created for all active students matching the target level.
+
+<ParamField body="date" type="string" required>
+  Task date in `YYYY-MM-DD` format.
+</ParamField>
+
+<ParamField body="level" type="string" required>
+  Literacy level this task targets: `foundational`, `functional`, `transitional`, `advanced`, or `all`. Pass `all` to create a task that applies to students of every level.
+</ParamField>
+
+<ParamField body="skills" type="array" required>
+  Array of skill types to create tasks for. 1–4 items. Each must be one of: `reading`, `listening`, `writing`, `speaking`.
+</ParamField>
+
+<ParamField body="contentBySkill" type="object">
+  Map of skill → array of content item UUIDs to link to that skill's task. Maximum 20 items per skill. Content items must have the matching `skill` field — mismatches are rejected.
+
+  ```json
+  {
+    "reading": ["content-uuid-1"],
+    "writing": ["content-uuid-2"]
+  }
+  ```
+</ParamField>
+
+<ParamField body="rpValue" type="number" required>
+  Reward points awarded for completing the task. Integer between 5 and 20. Applied uniformly to all skills in this request.
+</ParamField>
+
+<Note>
+  Setting `level` to `all` stores `null` in the database for the task's `level` field. Students of all literacy levels will see and receive `DailySubmission` records for these tasks.
+</Note>
+
+**Response 200**
+
+```json
+{
+  "ok": true,
+  "created": [
+    { "skill": "reading", "taskId": "uuid" },
+    { "skill": "writing", "taskId": "uuid" }
+  ]
+}
+```
+
+**Validation errors**
+
+| Condition | Status | Message |
+|-----------|--------|---------|
+| `date` not in YYYY-MM-DD format | 400 | Date must be YYYY-MM-DD format |
+| Content item not found or archived | 400 | Content item {id} not found or archived |
+| Content skill mismatch | 400 | Content item "{id}" has skill "{actual}" but was assigned to a "{target}" task |
+| Invalid `rpValue` | 400 | Validation error |
+
+**Example: Create reading and writing tasks for foundational students**
+
+```bash
+curl -X POST "https://your-domain.com/api/admin/daily-tasks" \
+  -H "Cookie: admin_token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "date": "2024-01-20",
+    "level": "foundational",
+    "skills": ["reading", "writing"],
+    "contentBySkill": {
+      "reading": ["CONTENT_UUID_1"],
+      "writing": ["CONTENT_UUID_2"]
+    },
+    "rpValue": 10
+  }'
+```
+
+---
+
+## Inactive students
+
+```bash
+GET /api/admin/inactive-students
+```
+
+Returns students who have not submitted a daily task in the last 24 hours, based on their `lastDailySubmissionAt` timestamp.
+
+---
+
+## Daily reviews
+
+```bash
+GET /api/admin/daily-reviews
+```
+
+Returns student daily submission records for admin review, including submitted artifacts (text and audio files) per skill.
+
+---
+
+## Approved users awaiting credentials
+
+```bash
+GET /api/admin/approved-users
+```
+
+Returns students with status `approved_pending_login` — those whose payments have been approved but who have not yet received login credentials.
+
+```bash
+POST /api/admin/approved-users/[id]/create-credentials
+```
+
+Creates a username and hashed password for the student, sets their status to `assessment_required`, and records a `CREDENTIALS_CREATED` audit log entry.

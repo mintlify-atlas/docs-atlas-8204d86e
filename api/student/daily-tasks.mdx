@@ -1,0 +1,292 @@
+---
+title: Daily tasks
+description: Endpoints for retrieving and submitting daily literacy tasks assigned to the logged-in student.
+---
+
+## GET /api/student/daily-tasks
+
+Returns today's tasks for the authenticated student. Tasks are filtered to the student's assigned literacy level — tasks with a `null` level are returned for all students regardless of level. Only students with `active` status can retrieve tasks.
+
+**Authentication:** `student_token` cookie (JWT)
+
+### Response
+
+<ResponseField name="tasks" type="array">
+  List of daily tasks for today.
+
+  <Expandable title="task properties">
+    <ResponseField name="id" type="string" required>
+      Unique task ID.
+    </ResponseField>
+    <ResponseField name="taskDate" type="string" required>
+      The UTC date this task is assigned to (ISO 8601).
+    </ResponseField>
+    <ResponseField name="skill" type="string" required>
+      The literacy skill targeted: `reading`, `listening`, `writing`, or `speaking`.
+    </ResponseField>
+    <ResponseField name="level" type="string">
+      The literacy level this task targets: `foundational`, `functional`, `transitional`, or `advanced`. `null` means the task applies to all levels.
+    </ResponseField>
+    <ResponseField name="isCompleted" type="boolean" required>
+      Whether the student has already completed and submitted this task.
+    </ResponseField>
+    <ResponseField name="submittedAt" type="string">
+      ISO 8601 timestamp of when the student submitted. `null` if not yet submitted.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="blocked" type="boolean">
+  Present and `true` if the student's account is not `active`. An empty `tasks` array is returned alongside this field.
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Reason for the block. Set to `not_active` when `blocked` is `true`.
+</ResponseField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://yourapp.example.com/api/student/daily-tasks \
+  --cookie 'student_token=<JWT>'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "tasks": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "taskDate": "2026-03-25T00:00:00.000Z",
+      "skill": "reading",
+      "level": "foundational",
+      "isCompleted": false,
+      "submittedAt": null
+    }
+  ]
+}
+```
+
+```json 200 (blocked)
+{
+  "tasks": [],
+  "blocked": true,
+  "reason": "not_active"
+}
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+</ResponseExample>
+
+---
+
+## GET /api/student/daily-tasks/\{taskId\}
+
+Returns the full details for a single daily task, including linked content items and the student's existing submission (if any). The task must match the student's literacy level (or have a `null` level) and the student must be `active`.
+
+**Authentication:** `student_token` cookie (JWT)
+
+### Path parameters
+
+<ParamField path="taskId" type="string" required>
+  The ID of the daily task to retrieve.
+</ParamField>
+
+### Response
+
+<ResponseField name="task" type="object" required>
+  Core task metadata.
+
+  <Expandable title="properties">
+    <ResponseField name="id" type="string">Task ID.</ResponseField>
+    <ResponseField name="taskDate" type="string">UTC task date (ISO 8601).</ResponseField>
+    <ResponseField name="skill" type="string">Targeted skill: `reading`, `listening`, `writing`, or `speaking`.</ResponseField>
+    <ResponseField name="level" type="string">Targeted literacy level, or `null` for all levels.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="content" type="array" required>
+  Content items linked to this task.
+
+  <Expandable title="content item properties">
+    <ResponseField name="id" type="string">Content item ID.</ResponseField>
+    <ResponseField name="title" type="string">Content title.</ResponseField>
+    <ResponseField name="description" type="string">Optional description.</ResponseField>
+    <ResponseField name="skill" type="string">Skill the content item supports.</ResponseField>
+    <ResponseField name="type" type="string">`passage_text`, `passage_audio`, `questions`, `writing_prompt`, `speaking_prompt`, or `pdf_document`.</ResponseField>
+    <ResponseField name="textBody" type="string">Inline text payload for text-based content types.</ResponseField>
+    <ResponseField name="assetUrl" type="string">URL for externally hosted assets.</ResponseField>
+    <ResponseField name="mimeType" type="string">MIME type when `assetUrl` or a file is present.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="existingSubmission" type="object">
+  The student's prior submission for this task. `null` if no submission exists yet.
+
+  <Expandable title="properties">
+    <ResponseField name="isCompleted" type="boolean">Whether the submission is finalised.</ResponseField>
+    <ResponseField name="submittedAt" type="string">ISO 8601 submission timestamp, or `null`.</ResponseField>
+    <ResponseField name="rpEarned" type="number">RP points awarded for this submission.</ResponseField>
+    <ResponseField name="artifacts" type="array">
+      Submitted artifacts.
+      <Expandable title="artifact properties">
+        <ResponseField name="id" type="string">Artifact ID.</ResponseField>
+        <ResponseField name="skill" type="string">Skill this artifact covers.</ResponseField>
+        <ResponseField name="textBody" type="string">Text content of the artifact, if a text submission.</ResponseField>
+        <ResponseField name="fileId" type="string">File ID of an uploaded audio artifact.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://yourapp.example.com/api/student/daily-tasks/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  --cookie 'student_token=<JWT>'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "task": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "taskDate": "2026-03-25T00:00:00.000Z",
+    "skill": "writing",
+    "level": "foundational"
+  },
+  "content": [
+    {
+      "id": "c1d2e3f4-0000-0000-0000-000000000001",
+      "title": "Writing prompt",
+      "description": null,
+      "skill": "writing",
+      "type": "writing_prompt",
+      "textBody": "Describe your favourite book in three sentences.",
+      "assetUrl": null,
+      "mimeType": null
+    }
+  ],
+  "existingSubmission": null
+}
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 403
+{ "error": "Forbidden" }
+```
+
+```json 404
+{ "error": "Not found" }
+```
+
+</ResponseExample>
+
+---
+
+## POST /api/student/daily-tasks/\{taskId\}/submit
+
+Finalises a task submission, awards RP points, and locks the submission so it cannot be changed. For `reading` and `speaking` tasks the student must have already uploaded an audio file (via [presign/confirm](/api/upload/presign-confirm)) before calling this endpoint. For `listening` and `writing` tasks, a `textResponse` must be included in the request body.
+
+**Authentication:** `student_token` cookie (JWT)
+
+<Note>
+  Submissions enforce a unique constraint on `(childId, dailyTaskId)`. Only one `DailySubmission` row can exist per student per task. Once `isCompleted` is set to `true` the submission is locked — subsequent POST calls return `409 Already submitted`.
+</Note>
+
+<Warning>
+  Calling this endpoint after the submission is already completed returns `409 Already submitted` and does not modify any data. Check `isCompleted` on the existing submission (via the GET endpoint) before submitting.
+</Warning>
+
+### Path parameters
+
+<ParamField path="taskId" type="string" required>
+  The ID of the daily task to submit.
+</ParamField>
+
+### Body
+
+<ParamField body="textResponse" type="string">
+  The student's written or dictated response. Required for `listening` and `writing` tasks. Maximum 5000 characters. Pass `null` or omit for `reading` and `speaking` tasks.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="rpEarned" type="number" required>
+  The number of RP points awarded for this task (the task's configured `rpValue`, defaulting to `10`).
+</ResponseField>
+
+### Side effects
+
+- `DailySubmission` row is updated: `isCompleted = true`, `submittedAt` and `rpEarned` set.
+- A `RpEvent` ledger entry is created with `delta = rpValue` and `reason = "daily_completion"`.
+- `Child.lastDailySubmissionAt` is updated to the current timestamp.
+
+<RequestExample>
+
+```bash cURL (writing task)
+curl --request POST \
+  --url https://yourapp.example.com/api/student/daily-tasks/a1b2c3d4-e5f6-7890-abcd-ef1234567890/submit \
+  --cookie 'student_token=<JWT>' \
+  --header 'Content-Type: application/json' \
+  --data '{"textResponse": "I enjoyed the story because it taught me about friendship."}'
+```
+
+```bash cURL (reading/speaking task)
+curl --request POST \
+  --url https://yourapp.example.com/api/student/daily-tasks/a1b2c3d4-e5f6-7890-abcd-ef1234567890/submit \
+  --cookie 'student_token=<JWT>' \
+  --header 'Content-Type: application/json' \
+  --data '{"textResponse": null}'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "ok": true,
+  "rpEarned": 10
+}
+```
+
+```json 400
+{ "error": "Audio recording is required." }
+```
+
+```json 400
+{ "error": "Text response is required." }
+```
+
+```json 401
+{ "error": "Unauthorized" }
+```
+
+```json 403
+{ "error": "Forbidden" }
+```
+
+```json 409
+{ "error": "Already submitted" }
+```
+
+</ResponseExample>

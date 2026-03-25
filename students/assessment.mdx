@@ -1,0 +1,155 @@
+---
+title: "Initial assessment"
+description: "How the initial literacy assessment works: when it is triggered, what each of the four skills covers, how to submit responses, and what happens after admin review."
+---
+
+Before a student gains access to daily tasks, they must complete an initial assessment across all four literacy skills. An admin then reviews the submitted artifacts and assigns one of four literacy levels, which gates which daily tasks the student receives.
+
+## When the assessment is triggered
+
+After an admin approves a student's payment, they create login credentials for the student. This action moves the account to `assessment_required` status.
+
+When the student logs in and visits `/student`, the dashboard shows an **Initial Assessment Required** prompt with a link to `/student/assessment`.
+
+<Note>
+  The assessment page checks the child's `status` field. If the status is anything other than `assessment_required`, the page redirects back to the student dashboard. A student cannot access the assessment after they have already submitted it.
+</Note>
+
+The assessment uses `AssessmentKind = initial`. A separate `AssessmentKind = periodic` is used for later re-evaluations by the admin — periodic assessments follow the same artifact model but are initiated differently.
+
+## The four skills
+
+The assessment covers all four skills defined in the `SkillType` enum. The page loads content items flagged as `isAssessmentDefault = true` from the content library and groups them by skill.
+
+<Tabs>
+  <Tab title="Reading">
+    **Content shown:** Passages, texts, or PDF documents marked as assessment defaults for the `reading` skill.
+
+    **How to respond:** The student records an audio response using the in-browser microphone. The recorder captures audio in `audio/webm` format.
+
+    - Maximum recording length: **10 minutes** (600 seconds). The recorder stops automatically at the limit.
+    - Maximum file size: **10 MB**.
+    - Students can delete and re-record as many times as needed before submitting.
+
+    **Artifact stored:** A `fileId` pointing to the uploaded audio file in Cloudflare R2.
+  </Tab>
+  <Tab title="Listening">
+    **Content shown:** Audio files or passages that the student listens to. Content items with a `mimeType` starting with `audio/` render an inline audio player; others show a link.
+
+    **How to respond:** The student types a written response in a text area (placeholder: "Write what you understood from the audio...").
+
+    - Maximum text length: **5000 characters**.
+
+    **Artifact stored:** A `textBody` string on the `AssessmentArtifact` record.
+  </Tab>
+  <Tab title="Writing">
+    **Content shown:** A writing prompt (`writing_prompt` content type) displayed as text.
+
+    **How to respond:** The student types their written answer in a text area (placeholder: "Write your answer here...").
+
+    - Maximum text length: **5000 characters**.
+
+    **Artifact stored:** A `textBody` string on the `AssessmentArtifact` record.
+  </Tab>
+  <Tab title="Speaking">
+    **Content shown:** A speaking prompt (`speaking_prompt` content type) displayed as text.
+
+    **How to respond:** The student records an audio response using the in-browser microphone, identical to the reading skill.
+
+    - Maximum recording length: **10 minutes** (600 seconds). Auto-stops at the limit.
+    - Maximum file size: **10 MB**.
+    - Students can delete and re-record before submitting.
+
+    **Artifact stored:** A `fileId` pointing to the uploaded audio file in Cloudflare R2.
+  </Tab>
+</Tabs>
+
+## Submitting audio recordings
+
+Audio responses for `reading` and `speaking` use the same three-step presigned upload flow as receipt uploads, with a different context value.
+
+<Steps>
+  <Step title="Request a presigned URL">
+    ```json
+    POST /api/upload/presign
+
+    {
+      "context": "assessment_audio",
+      "mimeType": "audio/webm",
+      "byteSize": 1048576,
+      "originalName": "reading.webm",
+      "assessmentId": "<assessmentId>",
+      "skill": "reading"
+    }
+    ```
+
+    The server verifies the assessment belongs to the authenticated student and has not already been submitted before issuing the URL.
+  </Step>
+  <Step title="Upload directly to R2">
+    ```
+    PUT <presignedUrl>
+    Content-Type: audio/webm
+
+    <audio bytes>
+    ```
+  </Step>
+  <Step title="Confirm the upload">
+    ```json
+    POST /api/upload/confirm
+
+    {
+      "fileId": "<fileId>",
+      "context": "assessment_audio",
+      "assessmentId": "<assessmentId>",
+      "skill": "reading"
+    }
+    ```
+
+    On success, the server creates (or replaces) an `AssessmentArtifact` record linking `fileId` to the assessment for that skill.
+  </Step>
+</Steps>
+
+## Submitting the assessment
+
+Once all four skills have a response — audio uploaded for `reading` and `speaking`, text entered for `listening` and `writing` — the **Submit Assessment** button becomes active.
+
+Clicking submit calls `POST /api/student/assessment/submit`:
+
+```json
+{
+  "assessmentId": "<uuid>",
+  "responses": {
+    "listening": "The audio described a boy who...",
+    "writing": "In my opinion, reading is important because..."
+  }
+}
+```
+
+The server:
+
+1. Validates the assessment belongs to the authenticated student.
+2. Confirms the assessment has not already been submitted.
+3. Deletes any prior text artifacts for the assessment, then creates new `AssessmentArtifact` records for the non-empty text responses.
+4. Marks the assessment `submittedAt` with the current timestamp.
+5. Transitions the child account from `assessment_required` → `pending_level_review`.
+
+After submission, the student is redirected to the dashboard where they see: **"Admin is assessing your level."**
+
+## Admin review and level assignment
+
+An admin reviews the submitted artifacts (text responses and audio files) and assigns one of four levels:
+
+| Level | Description |
+|---|---|
+| `foundational` | Beginning reader, basic word recognition |
+| `functional` | Can read simple texts with some support |
+| `transitional` | Independent reader building fluency |
+| `advanced` | Fluent reader working with complex texts |
+
+Once the admin assigns a level, the child account moves to `active` status and the `level` field is set. The student can then access daily tasks.
+
+## Periodic assessments
+
+<Info>
+  After a student is active, the admin can trigger a periodic assessment (`AssessmentKind = periodic`) to re-evaluate the student's literacy level. The artifact model is identical to the initial assessment — the same four skills, same submission types. The database enforces at most one assessment record per `(childId, kind)` combination via a unique constraint.
+</Info>

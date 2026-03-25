@@ -1,0 +1,78 @@
+---
+title: Admin Overview
+description: How the admin role works, what each dashboard section does, and the full AccountStatus state machine.
+---
+
+Admins manage the entire student lifecycle — from reviewing payments to assigning literacy levels and publishing daily tasks. All admin actions are recorded in the `AdminAuditLog` table.
+
+Admins sign in at `/admin/login`. The session is stored in an `admin_token` cookie (JWT). Every protected admin API route verifies this token before responding.
+
+## Dashboard sections
+
+<CardGroup cols={2}>
+  <Card title="Payments" href="/admin/payments">
+    Review pending `receipt_upload` and `transaction_id` payments. Approve or reject each submission. Approval moves the student to `approved_pending_login`.
+  </Card>
+  <Card title="Approved Users" href="/admin/student-management">
+    Students whose payment has been approved but whose login credentials have not yet been created. Set a username and password here to move them to `assessment_required`.
+  </Card>
+  <Card title="Assessments" href="/admin/student-management">
+    View submitted initial assessments. Read each student's artifacts (text or file), then assign a `LiteracyLevel` to move them to `active`.
+  </Card>
+  <Card title="Students" href="/admin/student-management">
+    Full searchable and sortable student list. View detail, edit profile fields, reset passwords, and archive/unarchive students.
+  </Card>
+  <Card title="Create Daily Tasks" href="/admin/daily-tasks">
+    Publish tasks for a given date. Choose date, level (or all levels), skills, RP value (5–20), and link content items per skill.
+  </Card>
+  <Card title="Review Daily Submissions" href="/admin/daily-tasks">
+    Browse student submissions for any date grouped by task. See completed/not-submitted status and view per-artifact content.
+  </Card>
+  <Card title="Upload Content" href="/admin/content-library">
+    Manage the content library. Create passages, prompts, audio files, and PDFs. Soft-delete items that are no longer needed.
+  </Card>
+  <Card title="Inactive Students" href="/admin/daily-tasks">
+    Monitor active students who have not completed their tasks for a chosen date. Filter by activity status and view parent contact details.
+  </Card>
+</CardGroup>
+
+## AccountStatus state machine
+
+Every `Child` record carries a `status` field that moves through the following states. Transitions are triggered by admin actions and never by the student directly.
+
+| Status | Meaning | How to advance |
+|---|---|---|
+| `pending_payment` | Student registered; payment not yet submitted or pending review. | Admin approves the payment. |
+| `approved_pending_login` | Payment approved; login credentials not yet created. | Admin creates username + password in the Approved Users screen. |
+| `assessment_required` | Credentials created; student must complete the initial assessment. | Student submits the assessment. |
+| `pending_level_review` | Assessment submitted; admin must review and assign a level. | Admin assigns a `LiteracyLevel` via the Assessments screen. |
+| `active` | Level assigned; student has full access to daily tasks. | — (normal operating state) |
+| `rejected` | Payment was rejected. Student cannot proceed. | — (terminal state) |
+
+```
+pending_payment
+  └─[approve payment]──► approved_pending_login
+                            └─[create credentials]──► assessment_required
+                                                        └─[student submits]──► pending_level_review
+                                                                                └─[admin assigns level]──► active
+pending_payment
+  └─[reject payment]───► rejected
+```
+
+## Audit log
+
+Every significant admin action writes a row to `AdminAuditLog`. The `action` field is one of the following enum values:
+
+| AuditAction | Triggered when |
+|---|---|
+| `PAYMENT_APPROVED` | Admin approves a pending payment. |
+| `PAYMENT_REJECTED` | Admin rejects a pending payment. |
+| `CREDENTIALS_CREATED` | Admin sets a student's username and password. |
+| `LEVEL_ASSIGNED` | Admin assigns a `LiteracyLevel` after reviewing an initial assessment. |
+| `LEVEL_CHANGED` | Admin changes a student's level after it was already assigned. |
+| `DAILY_SKILL_FOCUS_SET` | A daily task's skill focus is configured. |
+| `CONTENT_CREATED` | A new content item is added to the library. |
+| `CONTENT_ASSIGNED` | A content item is linked to a daily task. |
+| `STUDENT_PROFILE_EDITED` | Admin updates a student's or parent's profile fields. |
+
+Each log row links back to the acting admin and up to one target entity (child, payment, content item, daily task, or assessment) through nullable foreign keys.

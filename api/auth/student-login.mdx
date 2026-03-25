@@ -1,0 +1,265 @@
+---
+title: Student Login & Logout
+description: Authenticate as a student. Issues an HttpOnly session cookie containing a signed JWT, and provides a logout endpoint to clear it.
+---
+
+<Note>
+  **Two-layer authentication architecture**
+
+  The Next.js middleware (`middleware.ts`) protects `/student/*` routes on the
+  **edge runtime**, which cannot use Node.js crypto APIs. To avoid that
+  constraint, middleware only decodes the JWT's `exp` claim using `atob()` —
+  it does **not** verify the signature. This is the **UX layer**: it drives
+  redirects and the "session expired" message shown on the login page.
+
+  Full **cryptographic verification** — signature check, algorithm enforcement
+  (`HS256`), role claim validation — happens in every API route handler via
+  `verifyStudentJwt` from `lib/auth.ts`. The two layers are intentionally
+  separate: middleware handles user experience, route handlers enforce security.
+</Note>
+
+---
+
+## POST /api/student/login
+
+Verifies student credentials and sets a `student_token` session cookie on
+success. No authentication is required to call this endpoint.
+
+### Request body
+
+<ParamField body="username" type="string" required>
+  The student's username. Trimmed before lookup. Minimum 1 character, maximum
+  64 characters.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The student's password. Minimum 1 character, maximum 128 characters. The
+  128-character limit prevents denial-of-service via abnormally large inputs
+  to bcrypt.
+</ParamField>
+
+### Responses
+
+<ResponseField name="200 OK" type="object">
+  Credentials are valid and the account is active. The `student_token` cookie
+  is set on the response.
+
+  <Expandable title="Response body">
+    <ResponseField name="ok" type="true">
+      Always `true` on success.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="400 Bad Request" type="object">
+  The request body failed schema validation (e.g. missing field, username or
+  password exceeds the allowed length).
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      Human-readable description of the validation failure.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="401 Unauthorized" type="object">
+  No student account exists for the supplied username, the account has no
+  password set, or the password does not match. All cases return the same
+  generic message to prevent username enumeration.
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      `"Invalid credentials."`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="403 Forbidden" type="object">
+  Credentials are correct but the account is not permitted to log in. Two
+  distinct situations produce this response:
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      - `"This account has been deactivated. Please contact the administrator."` —
+        the account has an `archivedAt` timestamp (soft-deleted).
+      - `"Account not ready for login."` — the account status is
+        `pending_payment`, `approved_pending_login`, or `rejected`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="429 Too Many Requests" type="object">
+  The IP address has exceeded the student login rate limit: **10 requests per
+  15-minute sliding window**. Rate limiting is disabled in the `development`
+  environment.
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      Human-readable message including the wait time, e.g.
+      `"Too many login attempts. Please try again in 2 minutes."`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="500 Internal Server Error" type="object">
+  An unexpected server-side error occurred.
+
+  <Expandable title="Response body">
+    <ResponseField name="error" type="string">
+      `"Server error"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Cookie set on success
+
+| Attribute  | Value                                        |
+|------------|----------------------------------------------|
+| Name       | `student_token`                              |
+| `HttpOnly` | `true`                                       |
+| `Secure`   | `true` in production; `false` in development |
+| `SameSite` | `Lax`                                        |
+| `Path`     | `/`                                          |
+| `Max-Age`  | `604800` (7 days)                            |
+
+The cookie holds a **signed HS256 JWT** that expires in **1 day** (controlled
+by the `expiresIn: "1d"` signing option in `lib/auth.ts`). The cookie's
+`Max-Age` of 7 days is intentionally longer so the browser retains the cookie
+after JWT expiry. When middleware detects the token is expired it redirects to
+`/student/login?expired=1` and deletes the stale cookie so the redirect loop
+cannot repeat.
+
+### JWT payload (`StudentJwtPayload`)
+
+```ts
+{
+  childId:  string;     // UUID of the Child record in the database
+  username: string;     // Student's username
+  role:     "student"; // Always the literal string "student"
+  iat:      number;    // Issued-at (Unix timestamp, added by jsonwebtoken)
+  exp:      number;    // Expiry  (Unix timestamp, iat + 86400)
+}
+```
+
+The `role` claim is validated by `verifyStudentJwt` in `lib/auth.ts`. An admin
+token cannot pass student verification even if the other field shapes match.
+
+### Token expiry behavior
+
+When the JWT inside `student_token` reaches its `exp` timestamp:
+
+1. The next request to any `/student/*` page is intercepted by middleware.
+2. Middleware decodes `exp` from the JWT payload using `atob()` (no signature
+   check — edge runtime only).
+3. Middleware redirects to `/student/login?expired=1` and simultaneously
+   deletes the `student_token` cookie on the redirect response.
+4. The login page reads `?expired=1` and can display a "Your session has
+   expired" message.
+
+API routes always perform full cryptographic verification via `verifyStudentJwt`
+regardless of what middleware decided.
+
+### Rate limiting
+
+Requests are rate-limited per source IP using an in-memory sliding window
+limiter (`lib/rateLimit.ts`):
+
+- **Limit:** 10 requests per 15-minute window (generous to accommodate
+  children mistyping passwords)
+- **Keyed by:** first value of the `x-forwarded-for` header, falling back to
+  `x-real-ip`, then `"unknown"`
+- **Disabled in:** `NODE_ENV=development`
+
+### Example
+
+```bash
+curl -i -X POST https://example.com/api/student/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "readingstar42", "password": "mypassword"}'
+```
+
+**Success response**
+
+```http
+HTTP/2 200
+set-cookie: student_token=<jwt>; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax
+content-type: application/json
+
+{"ok":true}
+```
+
+**Invalid credentials**
+
+```http
+HTTP/2 401
+content-type: application/json
+
+{"error":"Invalid credentials."}
+```
+
+**Archived account**
+
+```http
+HTTP/2 403
+content-type: application/json
+
+{"error":"This account has been deactivated. Please contact the administrator."}
+```
+
+---
+
+## POST /api/student/logout
+
+Clears the `student_token` cookie, ending the student session. The endpoint
+does not verify the cookie before clearing it — calling it without a valid
+cookie still returns `200` and has no side effects.
+
+### Request
+
+No request body is required. The `student_token` cookie must be present in
+the browser's cookie jar for the browser to send it, but the endpoint does
+not reject requests that omit it.
+
+### Responses
+
+<ResponseField name="200 OK" type="object">
+  The `student_token` cookie has been cleared (`Max-Age: 0`).
+
+  <Expandable title="Response body">
+    <ResponseField name="ok" type="true">
+      Always `true`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Cookie cleared on success
+
+The response sets `student_token` to an empty string with `Max-Age: 0`,
+which instructs the browser to delete the cookie immediately.
+
+| Attribute  | Value                                        |
+|------------|----------------------------------------------|
+| Name       | `student_token`                              |
+| Value      | `""` (empty)                                 |
+| `Max-Age`  | `0` (delete immediately)                     |
+| `HttpOnly` | `true`                                       |
+| `Secure`   | `true` in production; `false` in development |
+| `SameSite` | `Lax`                                        |
+| `Path`     | `/`                                          |
+
+### Example
+
+```bash
+curl -i -X POST https://example.com/api/student/logout \
+  --cookie "student_token=<jwt>"
+```
+
+**Response**
+
+```http
+HTTP/2 200
+set-cookie: student_token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax
+content-type: application/json
+
+{"ok":true}
+```

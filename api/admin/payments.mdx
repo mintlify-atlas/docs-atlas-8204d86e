@@ -1,0 +1,154 @@
+---
+title: "Payments API"
+description: "Admin endpoints for reviewing and approving student payment submissions."
+---
+
+All endpoints require a valid `admin_token` cookie (set on admin login).
+
+## List payments
+
+```bash
+GET /api/admin/payments?status=pending
+```
+
+<ParamField query="status" type="string" default="pending">
+  Filter by payment status. One of: `pending`, `approved`, `rejected`.
+</ParamField>
+
+Returns payments ordered by `createdAt` descending. Each payment includes the full child record (with parent) and receipt file metadata (if receipt was uploaded).
+
+**Response 200**
+
+```json
+{
+  "payments": [
+    {
+      "id": "uuid",
+      "childId": "uuid",
+      "method": "receipt_upload",
+      "status": "pending",
+      "transactionId": null,
+      "createdAt": "2024-01-15T10:00:00.000Z",
+      "child": {
+        "id": "uuid",
+        "childFirstName": "Jane",
+        "childLastName": "Smith",
+        "grade": 3,
+        "status": "pending_payment",
+        "parent": {
+          "firstName": "John",
+          "lastName": "Smith",
+          "email": "john@example.com",
+          "phone": "+1234567890"
+        }
+      },
+      "receiptFile": {
+        "id": "uuid",
+        "originalName": "receipt.jpg",
+        "mimeType": "image/jpeg",
+        "createdAt": "2024-01-15T10:00:00.000Z"
+      }
+    }
+  ]
+}
+```
+
+<ResponseField name="payments" type="array">
+  Array of payment objects.
+  <Expandable title="Payment fields">
+    <ResponseField name="id" type="string">Payment UUID.</ResponseField>
+    <ResponseField name="method" type="string">`receipt_upload` or `transaction_id`.</ResponseField>
+    <ResponseField name="status" type="string">`pending`, `approved`, or `rejected`.</ResponseField>
+    <ResponseField name="transactionId" type="string | null">Present when method is `transaction_id`.</ResponseField>
+    <ResponseField name="receiptFile" type="object | null">Present when method is `receipt_upload`. Does not include `byteSize` (BigInt) in the response.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Example**
+
+```bash
+curl "https://your-domain.com/api/admin/payments?status=pending" \
+  -H "Cookie: admin_token=<token>"
+```
+
+---
+
+## Approve a payment
+
+```bash
+POST /api/admin/payments/[id]/approve
+```
+
+Marks the payment as `approved` and transitions the student's `AccountStatus` from `pending_payment` to `approved_pending_login`. Creates a `PAYMENT_APPROVED` entry in the admin audit log.
+
+After approval, the admin should then create login credentials for the student via the approved users workflow.
+
+**Response 200**
+
+```json
+{ "ok": true }
+```
+
+**Example**
+
+```bash
+curl -X POST "https://your-domain.com/api/admin/payments/PAYMENT_ID/approve" \
+  -H "Cookie: admin_token=<token>"
+```
+
+---
+
+## Reject a payment
+
+```bash
+POST /api/admin/payments/[id]/reject
+```
+
+<ParamField body="reviewNote" type="string">
+  Optional note explaining the rejection reason, visible in audit logs.
+</ParamField>
+
+Marks the payment as `rejected` and transitions the student's `AccountStatus` to `rejected`. Creates a `PAYMENT_REJECTED` entry in the admin audit log.
+
+<Warning>
+  Payment rejection is irreversible. The student's account will be set to `rejected` status. A new registration will be required if this was a mistake.
+</Warning>
+
+**Response 200**
+
+```json
+{ "ok": true }
+```
+
+**Example**
+
+```bash
+curl -X POST "https://your-domain.com/api/admin/payments/PAYMENT_ID/reject" \
+  -H "Cookie: admin_token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{"reviewNote": "Payment could not be verified"}'
+```
+
+---
+
+## View a receipt file
+
+```bash
+GET /api/admin/receipts/[fileId]
+```
+
+Returns a short-lived (60-second) presigned GET URL for viewing a payment receipt stored in Cloudflare R2. The URL is intended for displaying in the admin UI.
+
+**Response 200**
+
+```json
+{ "url": "https://r2-presigned-url..." }
+```
+
+**Error responses**
+
+| Status | Meaning |
+|--------|---------|
+| 401 | Unauthorized |
+| 404 | Receipt file not found |
+| 400 | File not in COMPLETED state |

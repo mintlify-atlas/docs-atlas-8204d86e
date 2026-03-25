@@ -1,0 +1,96 @@
+---
+title: Payment Management
+description: How to review, approve, and reject student payments, including receipt verification and credential creation.
+---
+
+Before a student can access the platform, their parent submits a payment. Payments arrive in one of two forms — an uploaded receipt image or a transaction ID — and must be manually reviewed by an admin.
+
+Payments are managed at `/admin/payments`.
+
+## PaymentStatus values
+
+| Status | Meaning |
+|---|---|
+| `pending` | Submitted by the parent; awaiting admin review. |
+| `approved` | Admin has verified the payment. |
+| `rejected` | Admin has rejected the payment. |
+
+## Viewing pending payments
+
+The payments list calls:
+
+```
+GET /api/admin/payments?status=pending
+```
+
+You can also pass `status=approved` or `status=rejected` to browse historical records. The response includes the child's name, grade, parent contact details, the payment method, and the receipt file reference (if any).
+
+## Payment methods
+
+<Tabs>
+  <Tab title="receipt_upload">
+    The parent uploaded a photo or scan of a physical payment receipt. The file is stored in R2 and linked to the payment record via `receiptFileId`.
+
+    To view the receipt, navigate to:
+
+    ```
+    GET /api/admin/receipts/[fileId]
+    ```
+
+    For R2-hosted files this endpoint issues a short-lived presigned URL (60-second TTL) and redirects the browser to it. Receipts are access-controlled — the route verifies the file is actually used as a payment receipt before serving it.
+
+    The payments page renders a **View receipt** link that opens this URL in a new tab.
+  </Tab>
+  <Tab title="transaction_id">
+    The parent entered a transaction reference string (e.g. a mobile money or bank transfer ID). This value is stored in `transactionId` on the `Payment` record and displayed alongside the student's details.
+
+    The admin is responsible for independently verifying the transaction ID against the payment processor's records before approving.
+  </Tab>
+</Tabs>
+
+## Approval workflow
+
+<Steps>
+  <Step title="Open the Payments page">
+    Navigate to `/admin/payments`. The status filter defaults to `pending`. Payments are ordered by `createdAt` descending.
+  </Step>
+  <Step title="Review the submission">
+    Check the student's name, grade, and parent contact. For `receipt_upload` payments, click **View receipt** to open the image. For `transaction_id` payments, verify the ID against your records.
+  </Step>
+  <Step title="Approve or reject">
+    Click **Approve** to call:
+
+    ```
+    POST /api/admin/payments/[id]/approve
+    ```
+
+    This sets `Payment.status = approved` and moves the student to `AccountStatus.approved_pending_login`. A `PAYMENT_APPROVED` entry is written to `AdminAuditLog`.
+
+    To reject, optionally enter a reason in the text area, then click **Reject** to call:
+
+    ```
+    POST /api/admin/payments/[id]/reject
+    ```
+
+    Body: `{ "reason": "<optional string>" }`
+
+    The `reason` is stored in `Payment.reviewNote`. The student's status moves to `rejected` and a `PAYMENT_REJECTED` audit log entry is created.
+  </Step>
+  <Step title="Create login credentials">
+    After approving a payment, the student appears in the **Approved Users** list at `/admin/approved-users`. Navigate there and enter a username and password to create the student's login credentials.
+
+    This calls:
+
+    ```
+    POST /api/admin/approved-users/[id]/create-credentials
+    ```
+
+    Body: `{ "username": "<string>", "password": "<string>" }`
+
+    Both fields are required. The password is hashed with bcrypt (cost factor 10) before storage. The student's status advances to `assessment_required` and a `CREDENTIALS_CREATED` audit log entry is written. Communicate the credentials to the parent directly (e.g. via SMS).
+  </Step>
+</Steps>
+
+<Warning>
+  Rejection is irreversible. Once a payment is rejected, the student's `AccountStatus` is set to `rejected` and cannot be changed through the normal workflow. Only payments with `status = pending` can be approved or rejected — attempting to act on an already-reviewed payment returns HTTP 400.
+</Warning>
